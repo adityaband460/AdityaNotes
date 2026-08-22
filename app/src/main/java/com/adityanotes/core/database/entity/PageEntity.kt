@@ -27,6 +27,8 @@ data class PageEntity(
 
     val name: String,
 
+    val content: String = "",
+
     val createdAt: Long,
 
     val updatedAt: Long

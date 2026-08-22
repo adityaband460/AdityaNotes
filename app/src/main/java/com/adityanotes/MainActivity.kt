@@ -1,24 +1,33 @@
 package com.adityanotes
 
+import com.adityanotes.feature.page.presentation.PageViewModel
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,15 +43,16 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.rememberNavController
 import com.adityanotes.core.navigation.AdityaNotesNavHost
+import com.adityanotes.core.navigation.AdityaNotesRoutes
 import com.adityanotes.feature.notebook.presentation.NotebookViewModel
 import com.adityanotes.ui.theme.AdityaNotesTheme
 import dagger.hilt.android.AndroidEntryPoint
-import androidx.compose.foundation.clickable
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     private val viewModel: NotebookViewModel by viewModels()
+    private val pageViewModel: PageViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,19 +63,19 @@ class MainActivity : ComponentActivity() {
                 val navController = rememberNavController()
 
                 AdityaNotesNavHost(
-                    navController = navController
-                ) {
-                    NotebookHomeScreen(
-                        viewModel = viewModel,
-                        onNotebookClick = { notebookId ->
-                            navController.navigate(
-                                com.adityanotes.core.navigation.AdityaNotesRoutes.pages(
-                                    notebookId
+                    navController = navController,
+                    pageViewModel = pageViewModel,
+                    notebookScreen = {
+                        NotebookHomeScreen(
+                            viewModel = viewModel,
+                            onNotebookClick = { notebookId ->
+                                navController.navigate(
+                                    AdityaNotesRoutes.pages(notebookId)
                                 )
-                            )
-                        }
-                    )
-                }
+                            }
+                        )
+                    }
+                )
             }
         }
     }
@@ -121,7 +131,15 @@ fun NotebookHomeScreen(
                     key = { it.id }
                 ) { notebook ->
 
+                    var showMenu by remember {
+                        mutableStateOf(false)
+                    }
+
                     var showDeleteDialog by remember {
+                        mutableStateOf(false)
+                    }
+
+                    var showRenameDialog by remember {
                         mutableStateOf(false)
                     }
 
@@ -135,25 +153,80 @@ fun NotebookHomeScreen(
                         Column(
                             modifier = Modifier.padding(16.dp)
                         ) {
-                            Text(
-                                text = notebook.name,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-
-                            Text(
-                                text = "Created ${notebook.createdAt}",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-
-                            TextButton(
-                                onClick = {
-                                    showDeleteDialog = true
-                                }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Delete")
+                                Column(
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = notebook.name,
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+
+                                    Text(
+                                        text = "Created ${notebook.createdAt}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        showMenu = true
+                                    }
+                                ) {
+                                    Text(
+                                        text = "⋮",
+                                        style = MaterialTheme.typography.titleLarge
+                                    )
+                                }
+
+                                DropdownMenu(
+                                    expanded = showMenu,
+                                    onDismissRequest = {
+                                        showMenu = false
+                                    }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("Rename")
+                                        },
+                                        onClick = {
+                                            showMenu = false
+                                            showRenameDialog = true
+                                        }
+                                    )
+
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("Delete")
+                                        },
+                                        onClick = {
+                                            showMenu = false
+                                            showDeleteDialog = true
+                                        }
+                                    )
+                                }
                             }
                         }
+                    }
+
+                    if (showRenameDialog) {
+                        RenameNotebookDialog(
+                            currentName = notebook.name,
+                            onDismiss = {
+                                showRenameDialog = false
+                            },
+                            onRename = { newName ->
+                                viewModel.renameNotebook(
+                                    notebook = notebook,
+                                    newName = newName
+                                )
+                                showRenameDialog = false
+                            }
+                        )
                     }
 
                     if (showDeleteDialog) {
@@ -245,7 +318,7 @@ private fun CreateNotebookDialog(
             Text("New notebook")
         },
         text = {
-            androidx.compose.material3.OutlinedTextField(
+            OutlinedTextField(
                 value = name,
                 onValueChange = {
                     name = it
@@ -269,6 +342,58 @@ private fun CreateNotebookDialog(
                 enabled = name.trim().isNotEmpty()
             ) {
                 Text("Create")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun RenameNotebookDialog(
+    currentName: String,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit
+) {
+    var name by remember {
+        mutableStateOf(currentName)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Rename notebook")
+        },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = {
+                    name = it
+                },
+                label = {
+                    Text("Notebook name")
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val trimmedName = name.trim()
+
+                    if (trimmedName.isNotEmpty()) {
+                        onRename(trimmedName)
+                    }
+                },
+                enabled = name.trim().isNotEmpty()
+            ) {
+                Text("Rename")
             }
         },
         dismissButton = {

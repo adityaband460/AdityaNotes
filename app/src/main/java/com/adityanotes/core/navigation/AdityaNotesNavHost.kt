@@ -1,21 +1,29 @@
 package com.adityanotes.core.navigation
 
 import androidx.compose.runtime.Composable
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
-import com.adityanotes.feature.notebook.presentation.PageListScreen
-import com.adityanotes.feature.notebook.presentation.PageViewModel
+import com.adityanotes.feature.page.presentation.PageEditorScreen
+import com.adityanotes.feature.page.presentation.PageScreen
+import com.adityanotes.feature.page.presentation.PageViewModel
 
 object AdityaNotesRoutes {
+
     const val NOTEBOOKS = "notebooks"
+
     const val PAGES = "pages/{notebookId}"
 
     fun pages(notebookId: Long): String {
         return "pages/$notebookId"
+    }
+
+    const val EDITOR = "editor/{pageId}"
+
+    fun editor(pageId: Long): String {
+        return "editor/$pageId"
     }
 }
 
@@ -23,12 +31,14 @@ object AdityaNotesRoutes {
 fun AdityaNotesNavHost(
     navController: NavHostController,
     startDestination: String = AdityaNotesRoutes.NOTEBOOKS,
-    notebookScreen: @Composable () -> Unit
+    notebookScreen: @Composable () -> Unit,
+    pageViewModel: PageViewModel
 ) {
     NavHost(
         navController = navController,
         startDestination = startDestination
     ) {
+
         composable(
             route = AdityaNotesRoutes.NOTEBOOKS
         ) {
@@ -48,11 +58,39 @@ fun AdityaNotesNavHost(
                 backStackEntry.arguments?.getLong("notebookId")
                     ?: return@composable
 
-            val viewModel: PageViewModel = hiltViewModel()
-
-            PageListScreen(
+            PageScreen(
                 notebookId = notebookId,
-                viewModel = viewModel
+                viewModel = pageViewModel,
+                onPageClick = { pageId ->
+                    navController.navigate(
+                        AdityaNotesRoutes.editor(pageId)
+                    )
+                },
+                onBack = {
+                    navController.popBackStack()
+                }
+            )
+        }
+
+        composable(
+            route = AdityaNotesRoutes.EDITOR,
+            arguments = listOf(
+                navArgument("pageId") {
+                    type = NavType.LongType
+                }
+            )
+        ) { backStackEntry ->
+
+            val pageId =
+                backStackEntry.arguments?.getLong("pageId")
+                    ?: return@composable
+
+            PageEditorScreen(
+                pageId = pageId,
+                viewModel = pageViewModel,
+                onBack = {
+                    navController.popBackStack()
+                }
             )
         }
     }

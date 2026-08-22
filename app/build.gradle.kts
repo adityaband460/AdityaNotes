@@ -44,6 +44,11 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.ink.authoring)
+    implementation(libs.androidx.ink.authoring.compose)
+    implementation(libs.androidx.ink.brush)
+    implementation(libs.androidx.input.motionprediction)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

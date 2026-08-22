@@ -15,11 +15,23 @@ interface PageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPage(page: PageEntity): Long
 
-    @Query("SELECT * FROM pages WHERE notebookId = :notebookId ORDER BY updatedAt DESC")
-    fun getPagesForNotebook(notebookId: Long): Flow<List<PageEntity>>
+    @Query(
+        "SELECT * FROM pages " +
+                "WHERE notebookId = :notebookId " +
+                "ORDER BY updatedAt DESC"
+    )
+    fun getPagesForNotebook(
+        notebookId: Long
+    ): Flow<List<PageEntity>>
 
-    @Query("SELECT * FROM pages WHERE id = :pageId LIMIT 1")
-    suspend fun getPageById(pageId: Long): PageEntity?
+    @Query(
+        "SELECT * FROM pages " +
+                "WHERE id = :pageId " +
+                "LIMIT 1"
+    )
+    suspend fun getPageById(
+        pageId: Long
+    ): PageEntity?
 
     @Update
     suspend fun updatePage(page: PageEntity)

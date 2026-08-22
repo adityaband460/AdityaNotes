@@ -12,7 +12,7 @@ import com.adityanotes.core.database.entity.PageEntity
         NotebookEntity::class,
         PageEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class AdityaNotesDatabase : RoomDatabase() {

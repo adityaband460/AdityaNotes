@@ -3,6 +3,7 @@ package com.adityanotes.core.di
 import android.content.Context
 import androidx.room.Room
 import com.adityanotes.core.database.AdityaNotesDatabase
+import com.adityanotes.core.database.MIGRATION_1_2
 import com.adityanotes.core.database.dao.NotebookDao
 import com.adityanotes.core.database.dao.PageDao
 import dagger.Module
@@ -24,8 +25,10 @@ object DatabaseModule {
         return Room.databaseBuilder(
             context,
             AdityaNotesDatabase::class.java,
-            "aditya_notes.db"
-        ).build()
+            "aditya_notes_database"
+        )
+            .addMigrations(MIGRATION_1_2)
+            .build()
     }
 
     @Provides
