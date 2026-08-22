@@ -32,9 +32,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.compose.rememberNavController
+import com.adityanotes.core.navigation.AdityaNotesNavHost
 import com.adityanotes.feature.notebook.presentation.NotebookViewModel
 import com.adityanotes.ui.theme.AdityaNotesTheme
 import dagger.hilt.android.AndroidEntryPoint
+import androidx.compose.foundation.clickable
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -47,7 +50,22 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AdityaNotesTheme {
-                NotebookHomeScreen(viewModel = viewModel)
+                val navController = rememberNavController()
+
+                AdityaNotesNavHost(
+                    navController = navController
+                ) {
+                    NotebookHomeScreen(
+                        viewModel = viewModel,
+                        onNotebookClick = { notebookId ->
+                            navController.navigate(
+                                com.adityanotes.core.navigation.AdityaNotesRoutes.pages(
+                                    notebookId
+                                )
+                            )
+                        }
+                    )
+                }
             }
         }
     }
@@ -56,7 +74,8 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NotebookHomeScreen(
-    viewModel: NotebookViewModel
+    viewModel: NotebookViewModel,
+    onNotebookClick: (Long) -> Unit
 ) {
     val notebooks by viewModel.notebooks.collectAsStateWithLifecycle()
 
@@ -107,7 +126,11 @@ fun NotebookHomeScreen(
                     }
 
                     Card(
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onNotebookClick(notebook.id)
+                            }
                     ) {
                         Column(
                             modifier = Modifier.padding(16.dp)
