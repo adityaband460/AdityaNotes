@@ -4,8 +4,13 @@ import android.content.Context
 import androidx.room.Room
 import com.adityanotes.core.database.AdityaNotesDatabase
 import com.adityanotes.core.database.MIGRATION_1_2
+import com.adityanotes.core.database.MIGRATION_2_3
+import com.adityanotes.core.database.MIGRATION_3_4
+import com.adityanotes.core.database.MIGRATION_4_5
+import com.adityanotes.core.database.MIGRATION_5_6
 import com.adityanotes.core.database.dao.NotebookDao
 import com.adityanotes.core.database.dao.PageDao
+import com.adityanotes.feature.page.data.StrokeDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -25,9 +30,15 @@ object DatabaseModule {
         return Room.databaseBuilder(
             context,
             AdityaNotesDatabase::class.java,
-            "aditya_notes_database"
+            "aditya_notes.db"
         )
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6
+            )
             .build()
     }
 
@@ -43,5 +54,12 @@ object DatabaseModule {
         database: AdityaNotesDatabase
     ): PageDao {
         return database.pageDao()
+    }
+
+    @Provides
+    fun provideStrokeDao(
+        database: AdityaNotesDatabase
+    ): StrokeDao {
+        return database.strokeDao()
     }
 }

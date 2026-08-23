@@ -29,6 +29,11 @@ data class PageEntity(
 
     val content: String = "",
 
+    /** BLANK, RULED, or GRID. Stored as text so templates remain migration-friendly. */
+    val paperTemplate: String = "RULED",
+
+    val isDarkPaper: Boolean = false,
+
     val createdAt: Long,
 
     val updatedAt: Long

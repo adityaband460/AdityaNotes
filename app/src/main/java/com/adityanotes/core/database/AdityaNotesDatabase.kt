@@ -6,18 +6,28 @@ import com.adityanotes.core.database.dao.NotebookDao
 import com.adityanotes.core.database.dao.PageDao
 import com.adityanotes.core.database.entity.NotebookEntity
 import com.adityanotes.core.database.entity.PageEntity
+import com.adityanotes.feature.page.data.StrokeDao
+import com.adityanotes.feature.page.data.StrokeEntity
+import com.adityanotes.feature.page.data.StrokeOperationDao
+import com.adityanotes.feature.page.data.StrokeOperationEntity
 
 @Database(
     entities = [
         NotebookEntity::class,
-        PageEntity::class
+        PageEntity::class,
+        StrokeEntity::class,
+        StrokeOperationEntity::class
     ],
-    version = 2,
-    exportSchema = true
+    version = 6,
+    exportSchema = false
 )
 abstract class AdityaNotesDatabase : RoomDatabase() {
 
     abstract fun notebookDao(): NotebookDao
 
     abstract fun pageDao(): PageDao
+
+    abstract fun strokeDao(): StrokeDao
+
+    abstract fun strokeOperationDao(): StrokeOperationDao
 }

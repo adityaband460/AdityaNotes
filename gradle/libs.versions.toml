@@ -90,8 +90,8 @@ androidx-ink-authoring = { group = "androidx.ink", name = "ink-authoring", versi
 androidx-ink-authoring-compose = { group = "androidx.ink", name = "ink-authoring-compose", version.ref = "ink" }
 
 androidx-ink-brush = { group = "androidx.ink", name = "ink-brush", version.ref = "ink" }
-
-
+androidx-ink-rendering = { group = "androidx.ink", name = "ink-rendering", version.ref = "ink" }
+androidx-ink-strokes = { group = "androidx.ink", name = "ink-strokes", version.ref = "ink" }
 [plugins]
 
 android-application = { id = "com.android.application", version.ref = "agp" }
