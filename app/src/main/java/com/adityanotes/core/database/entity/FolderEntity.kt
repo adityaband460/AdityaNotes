@@ -6,28 +6,26 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(
-    tableName = "notebooks",
+    tableName = "folders",
     foreignKeys = [
         ForeignKey(
             entity = FolderEntity::class,
             parentColumns = ["id"],
-            childColumns = ["folderId"],
+            childColumns = ["parentFolderId"],
             onDelete = ForeignKey.CASCADE
         )
     ],
     indices = [
-        Index(value = ["folderId"])
+        Index(value = ["parentFolderId"])
     ]
 )
-data class NotebookEntity(
+data class FolderEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
 
-    val folderId: Long? = null,
-
     val name: String,
 
-    val coverColor: Long = 0xFF1E3A8AL,
+    val parentFolderId: Long? = null,
 
     val createdAt: Long,
 

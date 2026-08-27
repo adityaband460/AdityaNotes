@@ -8,6 +8,8 @@ import com.adityanotes.core.database.MIGRATION_2_3
 import com.adityanotes.core.database.MIGRATION_3_4
 import com.adityanotes.core.database.MIGRATION_4_5
 import com.adityanotes.core.database.MIGRATION_5_6
+import com.adityanotes.core.database.MIGRATION_6_7
+import com.adityanotes.core.database.dao.FolderDao
 import com.adityanotes.core.database.dao.NotebookDao
 import com.adityanotes.core.database.dao.PageDao
 import com.adityanotes.feature.page.data.StrokeDao
@@ -37,9 +39,17 @@ object DatabaseModule {
                 MIGRATION_2_3,
                 MIGRATION_3_4,
                 MIGRATION_4_5,
-                MIGRATION_5_6
+                MIGRATION_5_6,
+                MIGRATION_6_7
             )
             .build()
+    }
+
+    @Provides
+    fun provideFolderDao(
+        database: AdityaNotesDatabase
+    ): FolderDao {
+        return database.folderDao()
     }
 
     @Provides

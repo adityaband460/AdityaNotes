@@ -21,5 +21,6 @@ data class StrokeOperationEntity(
 
 enum class StrokeOperationType {
     ADD,
-    ERASE
+    ERASE,
+    TRANSFORM
 }

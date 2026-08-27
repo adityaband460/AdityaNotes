@@ -14,10 +14,20 @@ object AdityaNotesRoutes {
 
     const val NOTEBOOKS = "notebooks"
 
+    const val NOTEBOOK_EDITOR = "notebook_editor/{notebookId}?pageId={pageId}"
+
+    fun notebookEditor(notebookId: Long, pageId: Long? = null): String {
+        return if (pageId != null) {
+            "notebook_editor/$notebookId?pageId=$pageId"
+        } else {
+            "notebook_editor/$notebookId"
+        }
+    }
+
     const val PAGES = "pages/{notebookId}"
 
     fun pages(notebookId: Long): String {
-        return "pages/$notebookId"
+        return notebookEditor(notebookId)
     }
 
     const val EDITOR = "editor/{pageId}"
@@ -46,10 +56,14 @@ fun AdityaNotesNavHost(
         }
 
         composable(
-            route = AdityaNotesRoutes.PAGES,
+            route = AdityaNotesRoutes.NOTEBOOK_EDITOR,
             arguments = listOf(
                 navArgument("notebookId") {
                     type = NavType.LongType
+                },
+                navArgument("pageId") {
+                    type = NavType.LongType
+                    defaultValue = -1L
                 }
             )
         ) { backStackEntry ->
@@ -58,14 +72,13 @@ fun AdityaNotesNavHost(
                 backStackEntry.arguments?.getLong("notebookId")
                     ?: return@composable
 
-            PageScreen(
+            val pageIdArg = backStackEntry.arguments?.getLong("pageId") ?: -1L
+            val targetPageId = if (pageIdArg > 0) pageIdArg else null
+
+            PageEditorScreen(
                 notebookId = notebookId,
+                initialPageId = targetPageId,
                 viewModel = pageViewModel,
-                onPageClick = { pageId ->
-                    navController.navigate(
-                        AdityaNotesRoutes.editor(pageId)
-                    )
-                },
                 onBack = {
                     navController.popBackStack()
                 }
@@ -86,7 +99,8 @@ fun AdityaNotesNavHost(
                     ?: return@composable
 
             PageEditorScreen(
-                pageId = pageId,
+                notebookId = null,
+                initialPageId = pageId,
                 viewModel = pageViewModel,
                 onBack = {
                     navController.popBackStack()

@@ -104,3 +104,41 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
         )
     }
 }
+
+val MIGRATION_6_7 = object : Migration(6, 7) {
+
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `folders` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `name` TEXT NOT NULL,
+                `parentFolderId` INTEGER,
+                `createdAt` INTEGER NOT NULL,
+                `updatedAt` INTEGER NOT NULL,
+                FOREIGN KEY(`parentFolderId`) REFERENCES `folders`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS `index_folders_parentFolderId` ON `folders` (`parentFolderId`)
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            ALTER TABLE `notebooks` ADD COLUMN `folderId` INTEGER DEFAULT NULL
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            ALTER TABLE `notebooks` ADD COLUMN `coverColor` INTEGER NOT NULL DEFAULT -14796150
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS `index_notebooks_folderId` ON `notebooks` (`folderId`)
+            """.trimIndent()
+        )
+    }
+}

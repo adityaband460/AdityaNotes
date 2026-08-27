@@ -18,7 +18,7 @@ interface PageDao {
     @Query(
         "SELECT * FROM pages " +
                 "WHERE notebookId = :notebookId " +
-                "ORDER BY updatedAt DESC"
+                "ORDER BY createdAt ASC, id ASC"
     )
     fun getPagesForNotebook(
         notebookId: Long
@@ -32,6 +32,9 @@ interface PageDao {
     suspend fun getPageById(
         pageId: Long
     ): PageEntity?
+
+    @Query("SELECT COUNT(*) FROM pages WHERE notebookId = :notebookId")
+    suspend fun getPageCount(notebookId: Long): Int
 
     @Update
     suspend fun updatePage(page: PageEntity)

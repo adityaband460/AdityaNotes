@@ -28,6 +28,17 @@ interface StrokeDao {
     @Query(
         """
         SELECT * FROM strokes
+        WHERE pageId IN (:pageIds)
+        ORDER BY createdAt ASC, id ASC
+        """
+    )
+    fun observeStrokesForPages(
+        pageIds: List<Long>
+    ): Flow<List<StrokeEntity>>
+
+    @Query(
+        """
+        SELECT * FROM strokes
         WHERE pageId = :pageId
         ORDER BY createdAt ASC, id ASC
         """
@@ -54,6 +65,16 @@ interface StrokeDao {
     ): StrokeEntity?
 
 
+    @Query(
+        """
+        SELECT * FROM strokes
+        WHERE id IN (:strokeIds)
+        """
+    )
+    suspend fun getStrokesByIds(
+        strokeIds: List<Long>
+    ): List<StrokeEntity>
+
     /*
      * Insert a new stroke.
      *
@@ -63,6 +84,16 @@ interface StrokeDao {
     suspend fun insertStroke(
         stroke: StrokeEntity
     ): Long
+
+    @Insert
+    suspend fun insertStrokes(
+        strokes: List<StrokeEntity>
+    ): List<Long>
+
+    @androidx.room.Update
+    suspend fun updateStrokes(
+        strokes: List<StrokeEntity>
+    )
 
 
     /*

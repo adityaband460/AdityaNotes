@@ -23,6 +23,10 @@ class StrokeRepository @Inject constructor(
     fun observeStrokes(pageId: Long): Flow<List<StrokeEntity>> =
         strokeDao.observeStrokes(pageId)
 
+    fun observeStrokesForPages(pageIds: List<Long>): Flow<List<StrokeEntity>> =
+        if (pageIds.isEmpty()) kotlinx.coroutines.flow.flowOf(emptyList())
+        else strokeDao.observeStrokesForPages(pageIds)
+
     suspend fun addStroke(stroke: StrokeEntity): Long = database.withTransaction {
         operationDao.deleteRedoOperations(stroke.pageId)
 
@@ -76,6 +80,64 @@ class StrokeRepository @Inject constructor(
         erasedStrokes.size
     }
 
+    suspend fun recordEraseOperation(
+        pageId: Long,
+        erasedStrokes: List<StrokeEntity>
+    ) = database.withTransaction {
+        if (erasedStrokes.isEmpty()) return@withTransaction
+        operationDao.deleteRedoOperations(pageId)
+        strokeDao.deleteStrokesByIds(erasedStrokes.map(StrokeEntity::id))
+        operationDao.insertOperation(
+            StrokeOperationEntity(
+                pageId = pageId,
+                type = StrokeOperationType.ERASE.name,
+                payload = StrokeSnapshotCodec.encode(erasedStrokes)
+            )
+        )
+    }
+
+    suspend fun deleteStrokesDirect(strokeIds: List<Long>) {
+        if (strokeIds.isEmpty()) return
+        strokeDao.deleteStrokesByIds(strokeIds)
+    }
+
+    suspend fun transformStrokes(
+        pageId: Long,
+        beforeStrokes: List<StrokeEntity>,
+        afterStrokes: List<StrokeEntity>
+    ) = database.withTransaction {
+        if (beforeStrokes.isEmpty() || afterStrokes.isEmpty()) return@withTransaction
+        operationDao.deleteRedoOperations(pageId)
+        strokeDao.updateStrokes(afterStrokes)
+        operationDao.insertOperation(
+            StrokeOperationEntity(
+                pageId = pageId,
+                type = StrokeOperationType.TRANSFORM.name,
+                payload = StrokeSnapshotCodec.encode(beforeStrokes)
+            )
+        )
+    }
+
+    suspend fun duplicateStrokes(
+        pageId: Long,
+        strokes: List<StrokeEntity>
+    ): List<StrokeEntity> = database.withTransaction {
+        if (strokes.isEmpty()) return@withTransaction emptyList()
+        operationDao.deleteRedoOperations(pageId)
+        val created = strokes.map { stroke ->
+            val id = strokeDao.insertStroke(stroke.copy(id = 0))
+            stroke.copy(id = id)
+        }
+        operationDao.insertOperation(
+            StrokeOperationEntity(
+                pageId = pageId,
+                type = StrokeOperationType.ADD.name,
+                payload = StrokeSnapshotCodec.encode(created)
+            )
+        )
+        created
+    }
+
     suspend fun undo(pageId: Long): Boolean = database.withTransaction {
         val operation = operationDao.getLatestAppliedOperation(pageId)
             ?: return@withTransaction false
@@ -99,6 +161,16 @@ class StrokeRepository @Inject constructor(
                 operationDao.updateOperationState(
                     operationId = operation.id,
                     payload = StrokeSnapshotCodec.encode(restoredStrokes),
+                    isUndone = true
+                )
+            }
+
+            StrokeOperationType.TRANSFORM -> {
+                val currentStrokes = strokeDao.getStrokesByIds(strokes.map(StrokeEntity::id))
+                strokeDao.updateStrokes(strokes)
+                operationDao.updateOperationState(
+                    operationId = operation.id,
+                    payload = StrokeSnapshotCodec.encode(currentStrokes),
                     isUndone = true
                 )
             }
@@ -136,6 +208,16 @@ class StrokeRepository @Inject constructor(
                 )
             }
 
+            StrokeOperationType.TRANSFORM -> {
+                val currentStrokes = strokeDao.getStrokesByIds(strokes.map(StrokeEntity::id))
+                strokeDao.updateStrokes(strokes)
+                operationDao.updateOperationState(
+                    operationId = operation.id,
+                    payload = StrokeSnapshotCodec.encode(currentStrokes),
+                    isUndone = false
+                )
+            }
+
             null -> return@withTransaction false
         }
 
@@ -148,67 +230,114 @@ class StrokeRepository @Inject constructor(
         stroke.copy(id = strokeDao.insertStroke(stroke.copy(id = 0)))
     }
 
-    private fun strokeTouchesEraser(
-        stroke: StrokeEntity,
-        eraserPoints: List<StrokePoint>,
-        eraserRadius: Float
-    ): Boolean {
-        val strokePoints = StrokePointCodec.decode(stroke.pointData)
-        if (strokePoints.isEmpty()) {
-            return false
+    companion object {
+        fun strokeTouchesEraser(
+            stroke: StrokeEntity,
+            eraserPoints: List<StrokePoint>,
+            eraserRadius: Float
+        ): Boolean {
+            val strokePoints = StrokePointCodec.decode(stroke.pointData)
+            if (strokePoints.isEmpty()) {
+                return false
+            }
+
+            return pathsTouch(
+                first = strokePoints,
+                second = eraserPoints,
+                radius = eraserRadius
+            )
         }
 
-        return pathsTouch(
-            first = strokePoints,
-            second = eraserPoints,
-            radius = eraserRadius
-        )
-    }
+        fun pathsTouch(
+            first: List<StrokePoint>,
+            second: List<StrokePoint>,
+            radius: Float
+        ): Boolean {
+            val squaredRadius = radius * radius
+            val firstSegments = first.zipWithNext().ifEmpty { first.zip(first) }
+            val secondSegments = second.zipWithNext().ifEmpty { second.zip(second) }
 
-    private fun pathsTouch(
-        first: List<StrokePoint>,
-        second: List<StrokePoint>,
-        radius: Float
-    ): Boolean {
-        val squaredRadius = radius * radius
-        val firstSegments = first.zipWithNext().ifEmpty { first.zip(first) }
-        val secondSegments = second.zipWithNext().ifEmpty { second.zip(second) }
-
-        return firstSegments.any { (start, end) ->
-            secondSegments.any { (eraserStart, eraserEnd) ->
-                pointToSegmentDistanceSquared(start, eraserStart, eraserEnd) <= squaredRadius ||
-                    pointToSegmentDistanceSquared(end, eraserStart, eraserEnd) <= squaredRadius ||
-                    pointToSegmentDistanceSquared(eraserStart, start, end) <= squaredRadius ||
-                    pointToSegmentDistanceSquared(eraserEnd, start, end) <= squaredRadius
+            return firstSegments.any { (start, end) ->
+                secondSegments.any { (eraserStart, eraserEnd) ->
+                    pointToSegmentDistanceSquared(start, eraserStart, eraserEnd) <= squaredRadius ||
+                        pointToSegmentDistanceSquared(end, eraserStart, eraserEnd) <= squaredRadius ||
+                        pointToSegmentDistanceSquared(eraserStart, start, end) <= squaredRadius ||
+                        pointToSegmentDistanceSquared(eraserEnd, start, end) <= squaredRadius
+                }
             }
         }
-    }
 
-    private fun pointToSegmentDistanceSquared(
-        point: StrokePoint,
-        start: StrokePoint,
-        end: StrokePoint
-    ): Float {
-        val dx = end.x - start.x
-        val dy = end.y - start.y
-        val segmentLengthSquared = dx * dx + dy * dy
+        fun pointToSegmentDistanceSquared(
+            point: StrokePoint,
+            start: StrokePoint,
+            end: StrokePoint
+        ): Float {
+            val dx = end.x - start.x
+            val dy = end.y - start.y
+            val segmentLengthSquared = dx * dx + dy * dy
 
-        if (segmentLengthSquared == 0f) {
-            val distanceX = point.x - start.x
-            val distanceY = point.y - start.y
+            if (segmentLengthSquared == 0f) {
+                val distanceX = point.x - start.x
+                val distanceY = point.y - start.y
+                return distanceX * distanceX + distanceY * distanceY
+            }
+
+            val projection = (
+                (point.x - start.x) * dx + (point.y - start.y) * dy
+                ) / segmentLengthSquared
+            val t = max(0f, minOf(1f, projection))
+            val closestX = start.x + t * dx
+            val closestY = start.y + t * dy
+            val distanceX = point.x - closestX
+            val distanceY = point.y - closestY
+
             return distanceX * distanceX + distanceY * distanceY
         }
+        fun precisionEraseStroke(
+            stroke: StrokeEntity,
+            eraserPoints: List<StrokePoint>,
+            eraserRadius: Float
+        ): List<StrokeEntity>? {
+            val strokePoints = StrokePointCodec.decode(stroke.pointData)
+            if (strokePoints.isEmpty()) return null
 
-        val projection = (
-            (point.x - start.x) * dx + (point.y - start.y) * dy
-            ) / segmentLengthSquared
-        val t = max(0f, minOf(1f, projection))
-        val closestX = start.x + t * dx
-        val closestY = start.y + t * dy
-        val distanceX = point.x - closestX
-        val distanceY = point.y - closestY
+            val squaredRadius = eraserRadius * eraserRadius
+            val eraserSegments = eraserPoints.zipWithNext().ifEmpty { eraserPoints.zip(eraserPoints) }
 
-        return distanceX * distanceX + distanceY * distanceY
+            fun isPointErased(pt: StrokePoint): Boolean {
+                return eraserSegments.any { (start, end) ->
+                    pointToSegmentDistanceSquared(pt, start, end) <= squaredRadius
+                }
+            }
+
+            var hasAnyErased = false
+            val remainingSegments = mutableListOf<MutableList<StrokePoint>>()
+            var currentSegment = mutableListOf<StrokePoint>()
+
+            for (pt in strokePoints) {
+                if (isPointErased(pt)) {
+                    hasAnyErased = true
+                    if (currentSegment.isNotEmpty()) {
+                        remainingSegments.add(currentSegment)
+                        currentSegment = mutableListOf()
+                    }
+                } else {
+                    currentSegment.add(pt)
+                }
+            }
+            if (currentSegment.isNotEmpty()) {
+                remainingSegments.add(currentSegment)
+            }
+
+            if (!hasAnyErased) return null
+
+            return remainingSegments.map { points ->
+                stroke.copy(
+                    id = 0,
+                    pointData = StrokePointCodec.encode(points)
+                )
+            }
+        }
     }
 
     private fun String.toOperationType(): StrokeOperationType? =

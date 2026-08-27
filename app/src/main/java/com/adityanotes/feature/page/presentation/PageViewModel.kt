@@ -2,7 +2,9 @@ package com.adityanotes.feature.page.presentation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.adityanotes.core.database.entity.NotebookEntity
 import com.adityanotes.core.database.entity.PageEntity
+import com.adityanotes.feature.notebook.data.NotebookRepository
 import com.adityanotes.feature.page.data.PageRepository
 import com.adityanotes.feature.page.data.StrokeEntity
 import com.adityanotes.feature.page.data.StrokePoint
@@ -22,63 +24,24 @@ import kotlinx.coroutines.sync.withLock
 @HiltViewModel
 class PageViewModel @Inject constructor(
     private val pageRepository: PageRepository,
-    private val strokeRepository: StrokeRepository
+    private val strokeRepository: StrokeRepository,
+    private val notebookRepository: NotebookRepository
 ) : ViewModel() {
 
     private val _pages = MutableStateFlow<List<PageEntity>>(emptyList())
     val pages: StateFlow<List<PageEntity>> = _pages.asStateFlow()
 
+    private val _currentNotebook = MutableStateFlow<NotebookEntity?>(null)
+    val currentNotebook: StateFlow<NotebookEntity?> = _currentNotebook.asStateFlow()
+
+    // Map of pageId to list of visible strokes for that page
+    private val _pageStrokes = MutableStateFlow<Map<Long, List<StrokeEntity>>>(emptyMap())
+    val pageStrokes: StateFlow<Map<Long, List<StrokeEntity>>> = _pageStrokes.asStateFlow()
+
     private var currentNotebookId: Long? = null
+    private var notebookJob: Job? = null
 
-    fun loadPages(notebookId: Long) {
-        if (currentNotebookId == notebookId) {
-            return
-        }
-
-        currentNotebookId = notebookId
-        viewModelScope.launch {
-            pageRepository.getPagesForNotebook(notebookId).collect { pageList ->
-                _pages.value = pageList
-            }
-        }
-    }
-
-    fun createPage(notebookId: Long, name: String) {
-        viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            pageRepository.createPage(
-                PageEntity(
-                    notebookId = notebookId,
-                    name = name,
-                    createdAt = now,
-                    updatedAt = now
-                )
-            )
-        }
-    }
-
-    fun renamePage(page: PageEntity, newName: String) {
-        if (newName.isBlank()) {
-            return
-        }
-
-        viewModelScope.launch {
-            pageRepository.updatePage(
-                page.copy(
-                    name = newName.trim(),
-                    updatedAt = System.currentTimeMillis()
-                )
-            )
-        }
-    }
-
-    fun deletePage(page: PageEntity) {
-        viewModelScope.launch {
-            pageRepository.deletePage(page)
-        }
-    }
-
-    /* Room Flow is the single source of truth for completed, visible strokes. */
+    /* Room Flow for completed, visible strokes of current active page. */
     private val _strokes = MutableStateFlow<List<StrokeEntity>>(emptyList())
     val strokes: StateFlow<List<StrokeEntity>> = _strokes.asStateFlow()
 
@@ -90,26 +53,145 @@ class PageViewModel @Inject constructor(
     private var strokeSessionId = 0L
     private val strokeMutex = Mutex()
 
-    fun loadStrokes(pageId: Long) {
-        if (currentPageId == pageId && strokesJob?.isActive == true) {
+    fun loadNotebook(notebookId: Long, initialPageId: Long? = null) {
+        if (currentNotebookId == notebookId && notebookJob?.isActive == true) {
+            if (initialPageId != null && currentPageId != initialPageId) {
+                setActivePage(initialPageId)
+            }
             return
         }
 
-        currentPageId = pageId
-        val sessionId = ++strokeSessionId
-        strokesJob?.cancel()
-        _strokes.value = emptyList()
-        _currentPage.value = null
+        currentNotebookId = notebookId
+        notebookJob?.cancel()
+        notebookJob = viewModelScope.launch {
+            _currentNotebook.value = notebookRepository.getNotebookById(notebookId)
+            pageRepository.getPagesForNotebook(notebookId).collect { pageList ->
+                if (pageList.isEmpty()) {
+                    // Create first page if notebook has none
+                    val now = System.currentTimeMillis()
+                    val newPageId = pageRepository.createPage(
+                        PageEntity(
+                            notebookId = notebookId,
+                            name = "Page 1",
+                            paperTemplate = "RULED",
+                            isDarkPaper = false,
+                            createdAt = now,
+                            updatedAt = now
+                        )
+                    )
+                    return@collect
+                }
 
-        strokesJob = viewModelScope.launch {
-            val page = pageRepository.getPageById(pageId)
-            if (currentPageId == pageId && strokeSessionId == sessionId) {
-                _currentPage.value = page
+                _pages.value = pageList
+
+                // Select active page
+                val targetPage = if (initialPageId != null) {
+                    pageList.firstOrNull { it.id == initialPageId } ?: pageList.first()
+                } else if (currentPageId != null) {
+                    pageList.firstOrNull { it.id == currentPageId } ?: pageList.first()
+                } else {
+                    pageList.first()
+                }
+
+                setActivePage(targetPage.id)
+
+                // Observe strokes for all pages in this notebook
+                val pageIds = pageList.map { it.id }
+                strokesJob?.cancel()
+                strokesJob = launch {
+                    strokeRepository.observeStrokesForPages(pageIds).collect { allStrokes ->
+                        val grouped = allStrokes.groupBy { it.pageId }
+                        _pageStrokes.value = grouped
+                        val activeId = currentPageId
+                        if (activeId != null) {
+                            _strokes.value = grouped[activeId] ?: emptyList()
+                        }
+                    }
+                }
             }
+        }
+    }
 
-            strokeRepository.observeStrokes(pageId).collect { databaseStrokes ->
-                if (currentPageId == pageId && strokeSessionId == sessionId) {
-                    _strokes.value = databaseStrokes
+    fun loadPages(notebookId: Long) {
+        loadNotebook(notebookId)
+    }
+
+    fun setActivePage(pageId: Long) {
+        if (currentPageId == pageId && _currentPage.value?.id == pageId) return
+        currentPageId = pageId
+        val page = _pages.value.firstOrNull { it.id == pageId }
+        _currentPage.value = page
+        _strokes.value = _pageStrokes.value[pageId] ?: emptyList()
+    }
+
+    fun addNewPage(
+        notebookId: Long,
+        template: String? = null,
+        isDarkPaper: Boolean? = null,
+        onCreated: (Long) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val existingPages = _pages.value
+            val existingCount = existingPages.size
+            val finalName = "Page ${existingCount + 1}"
+            val activePage = existingPages.firstOrNull { it.id == currentPageId } ?: existingPages.lastOrNull()
+            val finalTemplate = template ?: activePage?.paperTemplate ?: "RULED"
+            val finalIsDark = isDarkPaper ?: activePage?.isDarkPaper ?: false
+            val newId = pageRepository.createPage(
+                PageEntity(
+                    notebookId = notebookId,
+                    name = finalName,
+                    paperTemplate = finalTemplate,
+                    isDarkPaper = finalIsDark,
+                    createdAt = now,
+                    updatedAt = now
+                )
+            )
+            setActivePage(newId)
+            onCreated(newId)
+        }
+    }
+
+    fun duplicatePage(page: PageEntity, onCreated: (Long) -> Unit = {}) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val existingCount = _pages.value.size
+            val newId = pageRepository.createPage(
+                page.copy(
+                    id = 0,
+                    name = "Page ${existingCount + 1}",
+                    createdAt = now,
+                    updatedAt = now
+                )
+            )
+            // Duplicate strokes
+            val currentStrokes = _pageStrokes.value[page.id] ?: emptyList()
+            if (currentStrokes.isNotEmpty()) {
+                strokeRepository.duplicateStrokes(newId, currentStrokes)
+            }
+            setActivePage(newId)
+            onCreated(newId)
+        }
+    }
+
+    fun deletePage(page: PageEntity) {
+        viewModelScope.launch {
+            pageRepository.deletePage(page)
+            val remaining = _pages.value.filterNot { it.id == page.id }
+            if (remaining.isNotEmpty()) {
+                setActivePage(remaining.first().id)
+            }
+        }
+    }
+
+    fun loadStrokes(pageId: Long) {
+        setActivePage(pageId)
+        if (_pages.value.isEmpty()) {
+            viewModelScope.launch {
+                val page = pageRepository.getPageById(pageId)
+                if (page != null) {
+                    loadNotebook(page.notebookId, pageId)
                 }
             }
         }
@@ -161,6 +243,154 @@ class PageViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Instantly removes strokes from in-memory state and triggers Room deletion.
+     */
+    fun eraseStrokesInstantly(pageId: Long, strokeIds: Set<Long>) {
+        if (strokeIds.isEmpty()) return
+        _strokes.value = _strokes.value.filterNot { it.id in strokeIds }
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                strokeRepository.deleteStrokesDirect(strokeIds.toList())
+            }
+        }
+    }
+
+    /**
+     * Commits a single undoable ERASE operation for all strokes erased in one continuous drag.
+     */
+    fun commitEraseSession(pageId: Long, erasedStrokes: List<StrokeEntity>) {
+        if (erasedStrokes.isEmpty()) return
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                strokeRepository.recordEraseOperation(pageId, erasedStrokes)
+            }
+        }
+    }
+
+    /**
+     * Transforms (moves, scales, recolors) selected strokes with full Undo/Redo.
+     */
+    fun transformStrokes(
+        pageId: Long,
+        beforeStrokes: List<StrokeEntity>,
+        afterStrokes: List<StrokeEntity>
+    ) {
+        if (beforeStrokes.isEmpty() || afterStrokes.isEmpty()) return
+        val afterMap = afterStrokes.associateBy { it.id }
+        _strokes.value = _strokes.value.map { stroke ->
+            afterMap[stroke.id] ?: stroke
+        }
+        val currentGroup = _pageStrokes.value.toMutableMap()
+        val pageStrokesList = (currentGroup[pageId] ?: emptyList()).map { stroke ->
+            afterMap[stroke.id] ?: stroke
+        }
+        currentGroup[pageId] = pageStrokesList
+        _pageStrokes.value = currentGroup
+
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                strokeRepository.transformStrokes(pageId, beforeStrokes, afterStrokes)
+            }
+        }
+    }
+
+    /**
+     * Clones selected strokes and adds them to the page with full Undo/Redo.
+     */
+    fun duplicateStrokes(
+        pageId: Long,
+        strokes: List<StrokeEntity>,
+        onCreated: (List<StrokeEntity>) -> Unit = {}
+    ) {
+        if (strokes.isEmpty()) return
+        val offsetStrokes = strokes.map { stroke ->
+            val points = StrokePointCodec.decode(stroke.pointData)
+            val shifted = points.map { pt -> pt.copy(x = pt.x + 30f, y = pt.y + 30f) }
+            stroke.copy(pointData = StrokePointCodec.encode(shifted))
+        }
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                val created = strokeRepository.duplicateStrokes(pageId, offsetStrokes)
+                _strokes.value = _strokes.value + created
+                val currentGroup = _pageStrokes.value.toMutableMap()
+                currentGroup[pageId] = (currentGroup[pageId] ?: emptyList()) + created
+                _pageStrokes.value = currentGroup
+                onCreated(created)
+            }
+        }
+    }
+
+    /**
+     * Deletes a batch of strokes (e.g. from Lasso delete) in one undoable step.
+     */
+    fun deleteStrokes(pageId: Long, strokesToDelete: List<StrokeEntity>) {
+        if (strokesToDelete.isEmpty()) return
+        val idsToDelete = strokesToDelete.map { it.id }.toSet()
+        _strokes.value = _strokes.value.filterNot { it.id in idsToDelete }
+        val currentGroup = _pageStrokes.value.toMutableMap()
+        currentGroup[pageId] = (currentGroup[pageId] ?: emptyList()).filterNot { it.id in idsToDelete }
+        _pageStrokes.value = currentGroup
+
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                strokeRepository.recordEraseOperation(pageId, strokesToDelete)
+            }
+        }
+    }
+
+    /**
+     * Exports current notebook or specific page to a PDF document and opens the system share chooser.
+     */
+    fun exportToPdf(
+        context: android.content.Context,
+        targetPageId: Long? = null,
+        onComplete: (Boolean, String?) -> Unit
+    ) {
+        val notebook = _currentNotebook.value ?: return onComplete(false, "Notebook not found")
+        val pageList = _pages.value
+        if (pageList.isEmpty()) return onComplete(false, "No pages to export")
+
+        viewModelScope.launch {
+            val result = com.adityanotes.feature.page.data.PdfExporter.exportPdf(
+                context = context,
+                notebook = notebook,
+                pages = pageList,
+                pageStrokesProvider = { pageId ->
+                    if (pageId == currentPageId) {
+                        _strokes.value
+                    } else {
+                        strokeRepository.observeStrokes(pageId).let { flow ->
+                            // Read current snapshot
+                            var snapshot = emptyList<StrokeEntity>()
+                            val job = launch {
+                                flow.collect { snapshot = it }
+                            }
+                            kotlinx.coroutines.delay(50)
+                            job.cancel()
+                            snapshot
+                        }
+                    }
+                },
+                targetPageId = targetPageId
+            )
+
+            result.fold(
+                onSuccess = { file ->
+                    com.adityanotes.feature.page.data.PdfExporter.sharePdf(
+                        context = context,
+                        pdfFile = file,
+                        title = "${notebook.name}.pdf"
+                    )
+                    onComplete(true, null)
+                },
+                onFailure = { error ->
+                    onComplete(false, error.message ?: "Failed to generate PDF")
+                }
+            )
+        }
+    }
+
     fun undo() {
         val pageId = currentPageId ?: return
 
@@ -203,6 +433,7 @@ class PageViewModel @Inject constructor(
 
     override fun onCleared() {
         strokesJob?.cancel()
+        notebookJob?.cancel()
         super.onCleared()
     }
 }
