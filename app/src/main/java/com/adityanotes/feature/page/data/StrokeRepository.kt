@@ -118,6 +118,56 @@ class StrokeRepository @Inject constructor(
         )
     }
 
+    suspend fun transformStrokesMultiPage(
+        beforeStrokes: List<StrokeEntity>,
+        afterStrokes: List<StrokeEntity>
+    ) = database.withTransaction {
+        if (beforeStrokes.isEmpty() || afterStrokes.isEmpty()) return@withTransaction
+        val originPages = beforeStrokes.map { it.pageId }.distinct()
+        originPages.forEach { pageId ->
+            operationDao.deleteRedoOperations(pageId)
+        }
+        strokeDao.updateStrokes(afterStrokes)
+
+        val beforeGrouped = beforeStrokes.groupBy { it.pageId }
+        for ((pageId, strokesOnPage) in beforeGrouped) {
+            operationDao.insertOperation(
+                StrokeOperationEntity(
+                    pageId = pageId,
+                    type = StrokeOperationType.TRANSFORM.name,
+                    payload = StrokeSnapshotCodec.encode(strokesOnPage)
+                )
+            )
+        }
+    }
+
+    suspend fun commitPrecisionErase(
+        pageId: Long,
+        deletedIds: Set<Long>,
+        originalStrokes: List<StrokeEntity>,
+        finalStrokes: List<StrokeEntity>
+    ) = database.withTransaction {
+        if (deletedIds.isEmpty() && finalStrokes.isEmpty()) return@withTransaction
+        operationDao.deleteRedoOperations(pageId)
+        if (deletedIds.isNotEmpty()) {
+            strokeDao.deleteStrokesByIds(deletedIds.toList())
+        }
+        if (finalStrokes.isNotEmpty()) {
+            finalStrokes.forEach { stroke ->
+                strokeDao.insertStroke(stroke.copy(id = 0))
+            }
+        }
+        if (originalStrokes.isNotEmpty()) {
+            operationDao.insertOperation(
+                StrokeOperationEntity(
+                    pageId = pageId,
+                    type = StrokeOperationType.ERASE.name,
+                    payload = StrokeSnapshotCodec.encode(originalStrokes)
+                )
+            )
+        }
+    }
+
     suspend fun duplicateStrokes(
         pageId: Long,
         strokes: List<StrokeEntity>
@@ -138,8 +188,11 @@ class StrokeRepository @Inject constructor(
         created
     }
 
-    suspend fun undo(pageId: Long): Boolean = database.withTransaction {
-        val operation = operationDao.getLatestAppliedOperation(pageId)
+    suspend fun undo(pageId: Long): Boolean = undo(listOf(pageId))
+
+    suspend fun undo(pageIds: List<Long>): Boolean = database.withTransaction {
+        if (pageIds.isEmpty()) return@withTransaction false
+        val operation = operationDao.getLatestAppliedOperationForPages(pageIds)
             ?: return@withTransaction false
         val strokes = StrokeSnapshotCodec.decode(operation.payload)
         if (strokes.isEmpty()) {
@@ -181,8 +234,11 @@ class StrokeRepository @Inject constructor(
         true
     }
 
-    suspend fun redo(pageId: Long): Boolean = database.withTransaction {
-        val operation = operationDao.getNextRedoOperation(pageId)
+    suspend fun redo(pageId: Long): Boolean = redo(listOf(pageId))
+
+    suspend fun redo(pageIds: List<Long>): Boolean = database.withTransaction {
+        if (pageIds.isEmpty()) return@withTransaction false
+        val operation = operationDao.getNextRedoOperationForPages(pageIds)
             ?: return@withTransaction false
         val strokes = StrokeSnapshotCodec.decode(operation.payload)
         if (strokes.isEmpty()) {
@@ -236,16 +292,56 @@ class StrokeRepository @Inject constructor(
             eraserPoints: List<StrokePoint>,
             eraserRadius: Float
         ): Boolean {
-            val strokePoints = StrokePointCodec.decode(stroke.pointData)
-            if (strokePoints.isEmpty()) {
+            if (eraserPoints.isEmpty()) return false
+
+            // 1. Fast AABB Check (zero-allocation ByteBuffer scan)
+            val strokeBounds = StrokePointCodec.computeBounds(stroke.pointData, 0f) ?: return false
+
+            var eraserMinX = Float.MAX_VALUE
+            var eraserMinY = Float.MAX_VALUE
+            var eraserMaxX = -Float.MAX_VALUE
+            var eraserMaxY = -Float.MAX_VALUE
+            for (p in eraserPoints) {
+                if (p.x < eraserMinX) eraserMinX = p.x
+                if (p.x > eraserMaxX) eraserMaxX = p.x
+                if (p.y < eraserMinY) eraserMinY = p.y
+                if (p.y > eraserMaxY) eraserMaxY = p.y
+            }
+            eraserMinX -= eraserRadius
+            eraserMinY -= eraserRadius
+            eraserMaxX += eraserRadius
+            eraserMaxY += eraserRadius
+
+            if (strokeBounds.maxX < eraserMinX || strokeBounds.minX > eraserMaxX ||
+                strokeBounds.maxY < eraserMinY || strokeBounds.minY > eraserMaxY) {
                 return false
             }
 
-            return pathsTouch(
-                first = strokePoints,
-                second = eraserPoints,
-                radius = eraserRadius
-            )
+            // 2. Exact Distance Check only for candidate strokes touching the eraser circle
+            val strokePoints = StrokePointCodec.decode(stroke.pointData)
+            if (strokePoints.isEmpty()) return false
+
+            val squaredRadius = eraserRadius * eraserRadius
+            val eraserSegments = eraserPoints.zipWithNext().ifEmpty { eraserPoints.zip(eraserPoints) }
+
+            for (pt in strokePoints) {
+                for ((start, end) in eraserSegments) {
+                    if (pointToSegmentDistanceSquared(pt, start, end) <= squaredRadius) {
+                        return true
+                    }
+                }
+            }
+
+            val strokeSegments = strokePoints.zipWithNext().ifEmpty { strokePoints.zip(strokePoints) }
+            for (ep in eraserPoints) {
+                for ((sStart, sEnd) in strokeSegments) {
+                    if (pointToSegmentDistanceSquared(ep, sStart, sEnd) <= squaredRadius) {
+                        return true
+                    }
+                }
+            }
+
+            return false
         }
 
         fun pathsTouch(
@@ -293,11 +389,37 @@ class StrokeRepository @Inject constructor(
 
             return distanceX * distanceX + distanceY * distanceY
         }
+
         fun precisionEraseStroke(
             stroke: StrokeEntity,
             eraserPoints: List<StrokePoint>,
             eraserRadius: Float
         ): List<StrokeEntity>? {
+            if (eraserPoints.isEmpty()) return null
+
+            // 1. Fast AABB Check
+            val strokeBounds = StrokePointCodec.computeBounds(stroke.pointData, 0f) ?: return null
+
+            var eraserMinX = Float.MAX_VALUE
+            var eraserMinY = Float.MAX_VALUE
+            var eraserMaxX = -Float.MAX_VALUE
+            var eraserMaxY = -Float.MAX_VALUE
+            for (p in eraserPoints) {
+                if (p.x < eraserMinX) eraserMinX = p.x
+                if (p.x > eraserMaxX) eraserMaxX = p.x
+                if (p.y < eraserMinY) eraserMinY = p.y
+                if (p.y > eraserMaxY) eraserMaxY = p.y
+            }
+            eraserMinX -= eraserRadius
+            eraserMinY -= eraserRadius
+            eraserMaxX += eraserRadius
+            eraserMaxY += eraserRadius
+
+            if (strokeBounds.maxX < eraserMinX || strokeBounds.minX > eraserMaxX ||
+                strokeBounds.maxY < eraserMinY || strokeBounds.minY > eraserMaxY) {
+                return null
+            }
+
             val strokePoints = StrokePointCodec.decode(stroke.pointData)
             if (strokePoints.isEmpty()) return null
 
@@ -305,16 +427,47 @@ class StrokeRepository @Inject constructor(
             val eraserSegments = eraserPoints.zipWithNext().ifEmpty { eraserPoints.zip(eraserPoints) }
 
             fun isPointErased(pt: StrokePoint): Boolean {
-                return eraserSegments.any { (start, end) ->
-                    pointToSegmentDistanceSquared(pt, start, end) <= squaredRadius
+                for ((start, end) in eraserSegments) {
+                    if (pointToSegmentDistanceSquared(pt, start, end) <= squaredRadius) {
+                        return true
+                    }
                 }
+                return false
+            }
+
+            // Densify long stroke segments so erasing never misses lines cutting between two sparse vertices
+            val maxStep = (eraserRadius * 0.5f).coerceIn(1.5f, 12f)
+            val densified = ArrayList<StrokePoint>()
+            for (i in 0 until strokePoints.size) {
+                val curr = strokePoints[i]
+                if (i > 0) {
+                    val prev = strokePoints[i - 1]
+                    val dx = curr.x - prev.x
+                    val dy = curr.y - prev.y
+                    val dist = kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                    if (dist > maxStep) {
+                        val numSteps = (dist / maxStep).toInt().coerceAtLeast(1)
+                        for (s in 1 until numSteps) {
+                            val t = s.toFloat() / numSteps.toFloat()
+                            densified.add(
+                                StrokePoint(
+                                    x = prev.x + t * dx,
+                                    y = prev.y + t * dy,
+                                    pressure = prev.pressure + t * (curr.pressure - prev.pressure),
+                                    elapsedMillis = (prev.elapsedMillis + t * (curr.elapsedMillis - prev.elapsedMillis)).toInt()
+                                )
+                            )
+                        }
+                    }
+                }
+                densified.add(curr)
             }
 
             var hasAnyErased = false
             val remainingSegments = mutableListOf<MutableList<StrokePoint>>()
             var currentSegment = mutableListOf<StrokePoint>()
 
-            for (pt in strokePoints) {
+            for (pt in densified) {
                 if (isPointErased(pt)) {
                     hasAnyErased = true
                     if (currentSegment.isNotEmpty()) {
@@ -331,10 +484,16 @@ class StrokeRepository @Inject constructor(
 
             if (!hasAnyErased) return null
 
-            return remainingSegments.map { points ->
+            return remainingSegments.filter { it.isNotEmpty() }.map { rawPts ->
+                val pts = if (rawPts.size == 1) {
+                    val p = rawPts[0]
+                    listOf(p, StrokePoint(p.x + 0.05f, p.y + 0.05f, p.pressure, p.elapsedMillis + 1))
+                } else {
+                    rawPts
+                }
                 stroke.copy(
                     id = 0,
-                    pointData = StrokePointCodec.encode(points)
+                    pointData = StrokePointCodec.encode(pts)
                 )
             }
         }

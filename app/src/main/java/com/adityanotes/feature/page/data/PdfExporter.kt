@@ -10,7 +10,6 @@ import androidx.core.content.FileProvider
 import androidx.ink.brush.Brush
 import androidx.ink.brush.BrushFamily
 import androidx.ink.brush.InputToolType
-import androidx.ink.brush.SelfOverlap
 import androidx.ink.brush.StockBrushes
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.MutableStrokeInputBatch
@@ -49,7 +48,7 @@ object PdfExporter {
             val pdfDocument = PdfDocument()
             val canvasStrokeRenderer = CanvasStrokeRenderer.create()
             val penBrushFamily = StockBrushes.marker()
-            val highlighterBrushFamily = StockBrushes.highlighter(selfOverlap = SelfOverlap.DISCARD)
+            val highlighterBrushFamily = StockBrushes.highlighter()
 
             pagesToExport.forEachIndexed { index, pageEntity ->
                 val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, index + 1).create()
@@ -80,23 +79,141 @@ object PdfExporter {
                 // 2. Draw Paper Template Lines
                 when (pageEntity.paperTemplate.uppercase()) {
                     "RULED" -> {
-                        var y = 80f
-                        while (y < PAGE_HEIGHT) {
+                        var y = 60f
+                        while (y < PAGE_HEIGHT - 20f) {
                             canvas.drawLine(0f, y, PAGE_WIDTH.toFloat(), y, linePaint)
-                            y += 48f
+                            y += 36f
                         }
-                        canvas.drawLine(90f, 0f, 90f, PAGE_HEIGHT.toFloat(), marginPaint)
+                        canvas.drawLine(70f, 0f, 70f, PAGE_HEIGHT.toFloat(), marginPaint)
+                    }
+                    "COLLEGE_RULED" -> {
+                        var y = 56f
+                        while (y < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 26f
+                        }
+                        canvas.drawLine(70f, 0f, 70f, PAGE_HEIGHT.toFloat(), marginPaint)
                     }
                     "GRID" -> {
                         var x = 0f
                         while (x < PAGE_WIDTH) {
                             canvas.drawLine(x, 0f, x, PAGE_HEIGHT.toFloat(), linePaint)
-                            x += 42f
+                            x += 30f
                         }
                         var y = 0f
                         while (y < PAGE_HEIGHT) {
                             canvas.drawLine(0f, y, PAGE_WIDTH.toFloat(), y, linePaint)
-                            y += 42f
+                            y += 30f
+                        }
+                    }
+                    "CORNELL_RULED" -> {
+                        canvas.drawLine(0f, 80f, PAGE_WIDTH.toFloat(), 80f, marginPaint)
+                        val summaryTopY = PAGE_HEIGHT - 180f
+                        canvas.drawLine(0f, summaryTopY.toFloat(), PAGE_WIDTH.toFloat(), summaryTopY.toFloat(), marginPaint)
+                        val cueX = 220f
+                        canvas.drawLine(cueX, 80f, cueX, summaryTopY.toFloat(), marginPaint)
+
+                        var y = 112f
+                        while (y < summaryTopY) {
+                            canvas.drawLine(cueX, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 32f
+                        }
+                        var sy = summaryTopY + 36f
+                        while (sy < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, sy, PAGE_WIDTH.toFloat(), sy, linePaint)
+                            sy += 32f
+                        }
+                    }
+                    "CORNELL_GRID" -> {
+                        canvas.drawLine(0f, 80f, PAGE_WIDTH.toFloat(), 80f, marginPaint)
+                        val summaryTopY = PAGE_HEIGHT - 180f
+                        canvas.drawLine(0f, summaryTopY.toFloat(), PAGE_WIDTH.toFloat(), summaryTopY.toFloat(), marginPaint)
+                        val cueX = 220f
+                        canvas.drawLine(cueX, 80f, cueX, summaryTopY.toFloat(), marginPaint)
+
+                        var x = cueX + 28f
+                        while (x < PAGE_WIDTH) {
+                            canvas.drawLine(x, 80f, x, summaryTopY.toFloat(), linePaint)
+                            x += 28f
+                        }
+                        var y = 80f + 28f
+                        while (y < summaryTopY) {
+                            canvas.drawLine(cueX, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 28f
+                        }
+                        var sy = summaryTopY + 36f
+                        while (sy < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, sy, PAGE_WIDTH.toFloat(), sy, linePaint)
+                            sy += 32f
+                        }
+                    }
+                    "SINGLE_COLUMN" -> {
+                        val leftMargin = 70f
+                        val rightMargin = PAGE_WIDTH - 70f
+                        canvas.drawLine(leftMargin, 0f, leftMargin, PAGE_HEIGHT.toFloat(), marginPaint)
+                        canvas.drawLine(rightMargin, 0f, rightMargin, PAGE_HEIGHT.toFloat(), marginPaint)
+
+                        var y = 60f
+                        while (y < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(leftMargin, y, rightMargin, y, linePaint)
+                            y += 34f
+                        }
+                    }
+                    "TWO_COLUMN" -> {
+                        val midX = PAGE_WIDTH / 2f
+                        val topY = 60f
+                        canvas.drawLine(0f, topY, PAGE_WIDTH.toFloat(), topY, marginPaint)
+                        canvas.drawLine(midX, topY, midX, PAGE_HEIGHT.toFloat(), marginPaint)
+
+                        var y = topY + 34f
+                        while (y < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 34f
+                        }
+                    }
+                    "TWO_COLUMN_LEFT" -> {
+                        val cueX = 180f
+                        val topY = 60f
+                        canvas.drawLine(0f, topY, PAGE_WIDTH.toFloat(), topY, marginPaint)
+                        canvas.drawLine(cueX, topY, cueX, PAGE_HEIGHT.toFloat(), marginPaint)
+
+                        var y = topY + 34f
+                        while (y < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 34f
+                        }
+                    }
+                    "THREE_COLUMN" -> {
+                        val col1 = PAGE_WIDTH / 3f
+                        val col2 = (PAGE_WIDTH / 3f) * 2f
+                        val topY = 60f
+                        canvas.drawLine(0f, topY, PAGE_WIDTH.toFloat(), topY, marginPaint)
+                        canvas.drawLine(col1, topY, col1, PAGE_HEIGHT.toFloat(), marginPaint)
+                        canvas.drawLine(col2, topY, col2, PAGE_HEIGHT.toFloat(), marginPaint)
+
+                        var y = topY + 34f
+                        while (y < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 34f
+                        }
+                    }
+                    "DIARY" -> {
+                        val topBoxBottom = 90f
+                        canvas.drawLine(0f, topBoxBottom, PAGE_WIDTH.toFloat(), topBoxBottom, marginPaint)
+                        canvas.drawLine(70f, 0f, 70f, PAGE_HEIGHT.toFloat(), marginPaint)
+
+                        var y = topBoxBottom + 36f
+                        val reflectionBoxTop = PAGE_HEIGHT - 130f
+                        while (y < reflectionBoxTop) {
+                            canvas.drawLine(70f, y, PAGE_WIDTH.toFloat(), y, linePaint)
+                            y += 34f
+                        }
+
+                        canvas.drawLine(0f, reflectionBoxTop.toFloat(), PAGE_WIDTH.toFloat(), reflectionBoxTop.toFloat(), marginPaint)
+                        var ry = reflectionBoxTop + 34f
+                        while (ry < PAGE_HEIGHT - 20f) {
+                            canvas.drawLine(0f, ry, PAGE_WIDTH.toFloat(), ry, linePaint)
+                            ry += 34f
                         }
                     }
                     else -> {

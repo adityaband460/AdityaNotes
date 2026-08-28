@@ -88,7 +88,9 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -102,7 +104,6 @@ import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.brush.Brush
 import androidx.ink.brush.BrushFamily
 import androidx.ink.brush.InputToolType
-import androidx.ink.brush.SelfOverlap
 import androidx.ink.brush.StockBrushes
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.MutableStrokeInputBatch
@@ -142,6 +143,11 @@ fun PageEditorScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    val screenWidthPx = with(density) { configuration.screenWidthDp.dp.toPx() }
+    val screenHeightPx = with(density) { configuration.screenHeightDp.dp.toPx() }
+
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -161,11 +167,11 @@ fun PageEditorScreen(
     var selectedTool by remember { mutableStateOf(EditorTool.PEN) }
     var eraserMode by remember { mutableStateOf(EraserMode.STROKE) }
 
-    // Tool-specific size states
-    var penWidth by remember { mutableFloatStateOf(4f) }
-    var highlighterWidth by remember { mutableFloatStateOf(24f) }
-    var eraserWidth by remember { mutableFloatStateOf(80f) }
-    var laserWidth by remember { mutableFloatStateOf(10f) }
+    // Tool-specific size states (Defaults tuned to 5-preset standards)
+    var penWidth by remember { mutableFloatStateOf(2.2f) }
+    var highlighterWidth by remember { mutableFloatStateOf(24.0f) }
+    var eraserWidth by remember { mutableFloatStateOf(80.0f) }
+    var laserWidth by remember { mutableFloatStateOf(5.5f) }
     var laserDurationSec by remember { mutableFloatStateOf(2.5f) }
     var laserHasTail by remember { mutableStateOf(true) }
 
@@ -186,12 +192,14 @@ fun PageEditorScreen(
     var showThumbnailOverviewSheet by remember { mutableStateOf(false) }
     var showLaserSettingsDialog by remember { mutableStateOf(false) }
 
-    // 3 Quick Color Slots
+    // 5 Quick Color Slots
     val quickColors = remember {
         mutableStateListOf(
             0xFF1C1D1FL, // Onyx Black
             0xFF1A56DBL, // Sapphire Blue
-            0xFFE02424L  // Crimson Red
+            0xFFE02424L, // Crimson Red
+            0xFF057A55L, // Emerald Green
+            0xFF7E3AF2L  // Royal Violet
         )
     }
     var activeColorSlotIndex by remember { mutableIntStateOf(0) }
@@ -213,17 +221,34 @@ fun PageEditorScreen(
     var showAddPageDialog by remember { mutableStateOf(false) }
     var isExportingPdf by remember { mutableStateOf(false) }
 
-    val activePaperTemplate = remember(activePage?.paperTemplate) {
-        PaperTemplate.entries.firstOrNull { it.name == activePage?.paperTemplate } ?: PaperTemplate.RULED
+    // Determine currently visible/active page based on viewport center
+    val currentVisiblePageIndex = remember(panY, zoom, pages.size, screenHeightPx) {
+        if (pages.isEmpty()) 0
+        else {
+            val viewportCenterY = if (screenHeightPx > 0f) screenHeightPx / 2f else 600f
+            val docCenterY = (-panY + viewportCenterY) / zoom
+            val idx = (docCenterY / PAGE_HEIGHT).toInt()
+            idx.coerceIn(0, pages.size - 1)
+        }
     }
-    val activeIsDarkPaper = activePage?.isDarkPaper ?: false
+
+    val currentPage = pages.getOrNull(currentVisiblePageIndex) ?: activePage
+
+    LaunchedEffect(currentPage?.id) {
+        currentPage?.id?.let { viewModel.setActivePage(it) }
+    }
+
+    val activePaperTemplate = remember(currentPage?.paperTemplate) {
+        PaperTemplate.entries.firstOrNull { it.name == currentPage?.paperTemplate } ?: PaperTemplate.RULED
+    }
+    val activeIsDarkPaper = currentPage?.isDarkPaper ?: false
 
     val effectiveColor = remember(selectedColor, selectedTool) {
         selectedColor.withToolAlpha(selectedTool)
     }
 
     val penBrushFamily = remember { StockBrushes.marker() }
-    val highlighterBrushFamily = remember { StockBrushes.highlighter(selfOverlap = SelfOverlap.DISCARD) }
+    val highlighterBrushFamily = remember { StockBrushes.highlighter() }
     val canvasStrokeRenderer = remember { CanvasStrokeRenderer.create() }
     val strokeCache = remember { mutableMapOf<Long, InkStroke?>() }
     val recentFinishedStrokes = remember { mutableMapOf<String, InkStroke>() }
@@ -235,16 +260,11 @@ fun PageEditorScreen(
 
     // Optimistic strokes for zero-flicker dry layer handoff
     val optimisticStrokes = remember { mutableStateListOf<StrokeEntity>() }
+    var inkViewRef by remember { mutableStateOf<ContinuousInkView?>(null) }
 
     LaunchedEffect(pageStrokes) {
         if (optimisticStrokes.isNotEmpty()) {
-            val allPersistedKeys = pageStrokes.values.flatten().map {
-                "${it.pageId}_${it.pointData.contentHashCode()}_${it.color}"
-            }.toSet()
-            optimisticStrokes.removeAll { opt ->
-                val optKey = "${opt.pageId}_${opt.pointData.contentHashCode()}_${opt.color}"
-                optKey in allPersistedKeys
-            }
+            optimisticStrokes.clear()
         }
     }
 
@@ -268,16 +288,6 @@ fun PageEditorScreen(
             panY = focusY - (focusY - panY) * actualScale + panDeltaY
             zoom = newZoom
         }
-
-    // Determine currently visible page based on viewport center
-    val currentVisiblePageIndex = remember(panY, zoom, pages.size) {
-        if (pages.isEmpty()) 0
-        else {
-            val docCenterY = (-panY + 400f) / zoom
-            val idx = (docCenterY / (PAGE_HEIGHT + PAGE_GAP)).toInt()
-            idx.coerceIn(0, pages.size - 1)
-        }
-    }
 
     val pageCount = pages.size.coerceAtLeast(1)
 
@@ -303,7 +313,8 @@ fun PageEditorScreen(
                 },
                 onResetZoom = {
                     zoom = baseFitZoom
-                    panX = 0f
+                    panX = if (screenWidthPx > PAGE_WIDTH * baseFitZoom) (screenWidthPx - PAGE_WIDTH * baseFitZoom) / 2f else 0f
+                    panY = 0f
                 },
                 onToggleFingerDrawing = {
                     fingerDrawingEnabled = !fingerDrawingEnabled
@@ -327,7 +338,7 @@ fun PageEditorScreen(
                     isExportingPdf = true
                     viewModel.exportToPdf(
                         context = context,
-                        targetPageId = if (exportAll) null else activePage?.id
+                        targetPageId = if (exportAll) null else currentPage?.id
                     ) { success, errorMsg ->
                         isExportingPdf = false
                         if (!success && errorMsg != null) {
@@ -338,20 +349,20 @@ fun PageEditorScreen(
                     }
                 },
                 onTemplateSelected = { template ->
-                    activePage?.let { curr ->
+                    currentPage?.let { curr ->
                         viewModel.updatePaper(
                             pageId = curr.id,
                             paperTemplate = template.name,
-                            isDarkPaper = activeIsDarkPaper
+                            isDarkPaper = curr.isDarkPaper
                         )
                     }
                 },
                 onDarkPaperToggled = {
-                    activePage?.let { curr ->
+                    currentPage?.let { curr ->
                         viewModel.updatePaper(
                             pageId = curr.id,
-                            paperTemplate = activePaperTemplate.name,
-                            isDarkPaper = !activeIsDarkPaper
+                            paperTemplate = curr.paperTemplate,
+                            isDarkPaper = !curr.isDarkPaper
                         )
                     }
                 }
@@ -366,15 +377,18 @@ fun PageEditorScreen(
             val availableWidth = constraints.maxWidth.toFloat()
             val availableHeight = constraints.maxHeight.toFloat()
 
-            // Automatically fit page width to 100% full screen in portrait & landscape
-            LaunchedEffect(availableWidth, isInitializedFit) {
-                if (!isInitializedFit && availableWidth > 100f) {
-                    val fitZoom = availableWidth / PAGE_WIDTH
+            // 100% zoom is consistently based on portrait screen width so landscape does not blow up the page
+            LaunchedEffect(availableWidth, availableHeight) {
+                if (availableWidth > 100f && availableHeight > 100f) {
+                    val portraitWidth = min(availableWidth, availableHeight)
+                    val fitZoom = portraitWidth / PAGE_WIDTH
                     baseFitZoom = fitZoom
-                    zoom = fitZoom
-                    panX = 0f
-                    panY = 0f
-                    isInitializedFit = true
+                    if (!isInitializedFit) {
+                        zoom = fitZoom
+                        panX = if (availableWidth > PAGE_WIDTH * fitZoom) (availableWidth - PAGE_WIDTH * fitZoom) / 2f else 0f
+                        panY = 0f
+                        isInitializedFit = true
+                    }
                 }
             }
 
@@ -393,6 +407,9 @@ fun PageEditorScreen(
                             selectedTool = it
                             if (it != EditorTool.LASSO) {
                                 onLassoDeselectAction?.invoke()
+                            }
+                            if (it != EditorTool.PEN && it != EditorTool.HIGHLIGHTER) {
+                                optimisticStrokes.clear()
                             }
                         }
                     },
@@ -428,24 +445,33 @@ fun PageEditorScreen(
                         }) {
                             val hiddenIds = if (lassoDraggingActive) lassoSelectedStrokeIds else emptySet()
 
-                            // Render each page sequentially from top to bottom with strict page translation
+                            // Pass 1: Render all continuous paper sheets, templates & divider lines
                             pages.forEachIndexed { index, pageEntity ->
                                 val topY = pageTopY(index)
-
                                 withTransform({
                                     translate(left = 0f, top = topY)
                                 }) {
-                                    // 1. Draw Page Sheet & Paper Template
                                     drawContinuousPaperPage(
                                         pageIndex = index + 1,
                                         template = PaperTemplate.entries.firstOrNull { it.name == pageEntity.paperTemplate } ?: PaperTemplate.RULED,
                                         isDarkPaper = pageEntity.isDarkPaper
                                     )
+                                }
+                            }
 
-                                    // 2. Render Page Strokes
+                            // Pass 2: Render all strokes on top of all paper sheets
+                            pages.forEachIndexed { index, pageEntity ->
+                                val topY = pageTopY(index)
+                                withTransform({
+                                    translate(left = 0f, top = topY)
+                                }) {
                                     drawIntoCanvas { composeCanvas ->
                                         val nativeCanvas = composeCanvas.nativeCanvas
                                         val strokesForThisPage = pageStrokes[pageEntity.id] ?: emptyList()
+
+                                        val persistedKeys = strokesForThisPage.map {
+                                            "${it.pageId}_${it.pointData.contentHashCode()}_${it.color}"
+                                        }.toSet()
 
                                         // Highlighters First (persisted from Room)
                                         for (strokeEntity in strokesForThisPage) {
@@ -463,10 +489,12 @@ fun PageEditorScreen(
                                             }
                                         }
 
-                                        // Optimistic Highlighters (in-flight before Room emits)
+                                        // Optimistic Highlighters (in-flight before Room emits, ignore duplicates)
                                         for (strokeEntity in optimisticStrokes) {
+                                            if (strokeEntity.id in hiddenIds) continue
                                             if (strokeEntity.pageId == pageEntity.id && strokeEntity.tool == StrokeTool.HIGHLIGHTER.name) {
                                                 val cacheKey = "${strokeEntity.pageId}_${strokeEntity.pointData.contentHashCode()}_${strokeEntity.color}"
+                                                if (cacheKey in persistedKeys) continue // Prevent double-rendering / blinking!
                                                 val inkStroke = strokeCache[strokeEntity.id] ?: recentFinishedStrokes[cacheKey] ?: buildInkStroke(strokeEntity, penBrushFamily, highlighterBrushFamily)
                                                 if (inkStroke != null) {
                                                     canvasStrokeRenderer.draw(nativeCanvas, inkStroke, strokeToScreenMatrix)
@@ -492,10 +520,12 @@ fun PageEditorScreen(
                                             }
                                         }
 
-                                        // Optimistic Pen Strokes (in-flight before Room emits)
+                                        // Optimistic Pen Strokes (in-flight before Room emits, ignore duplicates)
                                         for (strokeEntity in optimisticStrokes) {
+                                            if (strokeEntity.id in hiddenIds) continue
                                             if (strokeEntity.pageId == pageEntity.id && strokeEntity.tool != StrokeTool.HIGHLIGHTER.name) {
                                                 val cacheKey = "${strokeEntity.pageId}_${strokeEntity.pointData.contentHashCode()}_${strokeEntity.color}"
+                                                if (cacheKey in persistedKeys) continue // Prevent double-rendering / blinking!
                                                 val inkStroke = strokeCache[strokeEntity.id] ?: recentFinishedStrokes[cacheKey] ?: buildInkStroke(strokeEntity, penBrushFamily, highlighterBrushFamily)
                                                 if (inkStroke != null) {
                                                     canvasStrokeRenderer.draw(nativeCanvas, inkStroke, strokeToScreenMatrix)
@@ -531,7 +561,7 @@ fun PageEditorScreen(
                                 laserDurationMs = (laserDurationSec * 1000).toLong(),
                                 laserHasTail = laserHasTail,
                                 pagesProvider = { viewModel.pages.value },
-                                activePageIdProvider = { viewModel.currentPage.value?.id },
+                                activePageIdProvider = { currentPage?.id ?: viewModel.currentPage.value?.id },
                                 pageStrokesProvider = { viewModel.pageStrokes.value },
                                 viewModel = viewModel,
                                 zoom = zoom,
@@ -540,20 +570,12 @@ fun PageEditorScreen(
                                 fingerDrawingEnabled = fingerDrawingEnabled,
                                 onViewportTransform = onViewportTransform,
                                 onOptimisticStroke = { optimisticStroke, prebuiltInkStroke ->
+                                    val cacheKey = "${optimisticStroke.pageId}_${optimisticStroke.pointData.contentHashCode()}_${optimisticStroke.color}"
                                     if (prebuiltInkStroke != null) {
                                         strokeCache[optimisticStroke.id] = prebuiltInkStroke
-                                        val cacheKey = "${optimisticStroke.pageId}_${optimisticStroke.pointData.size}_${optimisticStroke.color}"
                                         recentFinishedStrokes[cacheKey] = prebuiltInkStroke
                                     }
                                     optimisticStrokes.add(optimisticStroke)
-                                },
-                                onFinishedInkStrokeReady = { cacheKey, entityId, inkStroke ->
-                                    if (entityId != 0L) {
-                                        strokeCache[entityId] = inkStroke
-                                    }
-                                    if (cacheKey.isNotEmpty()) {
-                                        recentFinishedStrokes[cacheKey] = inkStroke
-                                    }
                                 },
                                 onLassoSelectionChanged = { count, selectedIds, isDragging, duplicateFn, recolorFn, deleteFn, deselectFn ->
                                     selectedLassoCount = count
@@ -564,23 +586,32 @@ fun PageEditorScreen(
                                     onLassoDeleteAction = deleteFn
                                     onLassoDeselectAction = deselectFn
                                 },
-                                onInvalidateCache = { idsToClear ->
-                                    if (idsToClear == null) {
+                                onInvalidateCache = { ids ->
+                                    if (ids == null) {
                                         strokeCache.clear()
                                         recentFinishedStrokes.clear()
+                                        optimisticStrokes.clear()
                                     } else {
-                                        idsToClear.forEach { strokeCache.remove(it) }
+                                        ids.forEach { strokeCache.remove(it) }
+                                        optimisticStrokes.removeAll { it.id in ids }
                                     }
                                 },
                                 onAddPageAtBottom = {
                                     val nbId = notebookId ?: pages.firstOrNull()?.notebookId
                                     nbId?.let { id ->
-                                        viewModel.addNewPage(notebookId = id)
+                                        optimisticStrokes.clear()
+                                        strokeCache.clear()
+                                        viewModel.addNewPage(
+                                            notebookId = id,
+                                            template = activePaperTemplate.name,
+                                            isDarkPaper = activeIsDarkPaper
+                                        )
                                     }
                                 }
-                            )
+                            ).also { inkViewRef = it }
                         },
                         update = { view ->
+                            inkViewRef = view
                             view.updateConfiguration(
                                 brush = brush,
                                 tool = selectedTool,
@@ -1267,10 +1298,10 @@ private fun FreeNotesToolbar(
                 ToolbarDivider()
 
                 val presets = when (selectedTool) {
-                    EditorTool.PEN -> listOf(2f, 4f, 8f)
-                    EditorTool.HIGHLIGHTER -> listOf(14f, 24f, 40f)
-                    EditorTool.ERASER -> listOf(40f, 80f, 160f)
-                    EditorTool.LASER -> listOf(6f, 10f, 18f)
+                    EditorTool.PEN -> listOf(1.5f, 2.2f, 3.2f, 4.8f, 7.0f)
+                    EditorTool.HIGHLIGHTER -> listOf(12.0f, 20.0f, 32.0f, 48.0f, 64.0f)
+                    EditorTool.ERASER -> listOf(20.0f, 45.0f, 80.0f, 140.0f, 220.0f)
+                    EditorTool.LASER -> listOf(2.0f, 3.5f, 5.5f, 8.5f, 12.0f)
                     EditorTool.LASSO -> emptyList()
                 }
 
@@ -1281,9 +1312,11 @@ private fun FreeNotesToolbar(
                     presets.forEach { width ->
                         val isSelected = (currentWidth - width).let { it in -0.6f..0.6f }
                         val dotScale = when (width) {
-                            presets[0] -> 4.dp
-                            presets[1] -> 7.dp
-                            else -> 11.dp
+                            presets[0] -> 3.dp
+                            presets[1] -> 5.dp
+                            presets[2] -> 7.dp
+                            presets[3] -> 10.dp
+                            else -> 13.dp
                         }
 
                         Surface(
@@ -1355,23 +1388,155 @@ private fun DrawScope.drawContinuousPaperPage(
     when (template) {
         PaperTemplate.BLANK -> Unit
         PaperTemplate.RULED -> {
-            var y = 56f
-            while (y < PAGE_HEIGHT) {
+            var y = 60f
+            while (y < PAGE_HEIGHT - 20f) {
                 drawLine(lineColor, start = Offset(0f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
                 y += 36f
             }
-            drawLine(marginColor, start = Offset(60f, 0f), end = Offset(60f, PAGE_HEIGHT), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(70f, 0f), end = Offset(70f, PAGE_HEIGHT), strokeWidth = 1.5f)
+        }
+        PaperTemplate.COLLEGE_RULED -> {
+            var y = 56f
+            while (y < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 26f
+            }
+            drawLine(marginColor, start = Offset(70f, 0f), end = Offset(70f, PAGE_HEIGHT), strokeWidth = 1.5f)
         }
         PaperTemplate.GRID -> {
             var x = 0f
             while (x < PAGE_WIDTH) {
                 drawLine(lineColor, start = Offset(x, 0f), end = Offset(x, PAGE_HEIGHT), strokeWidth = 1f)
-                x += 32f
+                x += 30f
             }
             var y = 0f
             while (y < PAGE_HEIGHT) {
                 drawLine(lineColor, start = Offset(0f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 30f
+            }
+        }
+        PaperTemplate.CORNELL_RULED -> {
+            // Header block (Title & Date)
+            drawLine(marginColor, start = Offset(0f, 80f), end = Offset(PAGE_WIDTH, 80f), strokeWidth = 1.5f)
+            // Summary block (Bottom area)
+            val summaryTopY = PAGE_HEIGHT - 180f
+            drawLine(marginColor, start = Offset(0f, summaryTopY), end = Offset(PAGE_WIDTH, summaryTopY), strokeWidth = 1.5f)
+            // Cue column dividing line
+            val cueX = 220f
+            drawLine(marginColor, start = Offset(cueX, 80f), end = Offset(cueX, summaryTopY), strokeWidth = 1.5f)
+
+            // Main notes area rulings
+            var y = 112f
+            while (y < summaryTopY) {
+                drawLine(lineColor, start = Offset(cueX, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
                 y += 32f
+            }
+            // Summary area rulings
+            var sy = summaryTopY + 36f
+            while (sy < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, sy), end = Offset(PAGE_WIDTH, sy), strokeWidth = 1f)
+                sy += 32f
+            }
+        }
+        PaperTemplate.CORNELL_GRID -> {
+            // Header block
+            drawLine(marginColor, start = Offset(0f, 80f), end = Offset(PAGE_WIDTH, 80f), strokeWidth = 1.5f)
+            // Summary block
+            val summaryTopY = PAGE_HEIGHT - 180f
+            drawLine(marginColor, start = Offset(0f, summaryTopY), end = Offset(PAGE_WIDTH, summaryTopY), strokeWidth = 1.5f)
+            // Cue column dividing line
+            val cueX = 220f
+            drawLine(marginColor, start = Offset(cueX, 80f), end = Offset(cueX, summaryTopY), strokeWidth = 1.5f)
+
+            // Main notes area grid
+            var x = cueX + 28f
+            while (x < PAGE_WIDTH) {
+                drawLine(lineColor, start = Offset(x, 80f), end = Offset(x, summaryTopY), strokeWidth = 1f)
+                x += 28f
+            }
+            var y = 80f + 28f
+            while (y < summaryTopY) {
+                drawLine(lineColor, start = Offset(cueX, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 28f
+            }
+            // Summary area rulings
+            var sy = summaryTopY + 36f
+            while (sy < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, sy), end = Offset(PAGE_WIDTH, sy), strokeWidth = 1f)
+                sy += 32f
+            }
+        }
+        PaperTemplate.SINGLE_COLUMN -> {
+            val leftMargin = 70f
+            val rightMargin = PAGE_WIDTH - 70f
+            drawLine(marginColor, start = Offset(leftMargin, 0f), end = Offset(leftMargin, PAGE_HEIGHT), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(rightMargin, 0f), end = Offset(rightMargin, PAGE_HEIGHT), strokeWidth = 1.5f)
+
+            var y = 60f
+            while (y < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(leftMargin, y), end = Offset(rightMargin, y), strokeWidth = 1f)
+                y += 34f
+            }
+        }
+        PaperTemplate.TWO_COLUMN -> {
+            val midX = PAGE_WIDTH / 2f
+            val topY = 60f
+            drawLine(marginColor, start = Offset(0f, topY), end = Offset(PAGE_WIDTH, topY), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(midX, topY), end = Offset(midX, PAGE_HEIGHT), strokeWidth = 1.5f)
+
+            var y = topY + 34f
+            while (y < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 34f
+            }
+        }
+        PaperTemplate.TWO_COLUMN_LEFT -> {
+            val cueX = 180f
+            val topY = 60f
+            drawLine(marginColor, start = Offset(0f, topY), end = Offset(PAGE_WIDTH, topY), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(cueX, topY), end = Offset(cueX, PAGE_HEIGHT), strokeWidth = 1.5f)
+
+            var y = topY + 34f
+            while (y < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 34f
+            }
+        }
+        PaperTemplate.THREE_COLUMN -> {
+            val col1 = PAGE_WIDTH / 3f
+            val col2 = (PAGE_WIDTH / 3f) * 2f
+            val topY = 60f
+            drawLine(marginColor, start = Offset(0f, topY), end = Offset(PAGE_WIDTH, topY), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(col1, topY), end = Offset(col1, PAGE_HEIGHT), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(col2, topY), end = Offset(col2, PAGE_HEIGHT), strokeWidth = 1.5f)
+
+            var y = topY + 34f
+            while (y < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 34f
+            }
+        }
+        PaperTemplate.DIARY -> {
+            val topBoxBottom = 90f
+            // Date / header banner
+            drawLine(marginColor, start = Offset(0f, topBoxBottom), end = Offset(PAGE_WIDTH, topBoxBottom), strokeWidth = 1.5f)
+            drawLine(marginColor, start = Offset(70f, 0f), end = Offset(70f, PAGE_HEIGHT), strokeWidth = 1.5f)
+            drawLine(marginColor.copy(alpha = 0.5f), start = Offset(76f, 0f), end = Offset(76f, PAGE_HEIGHT), strokeWidth = 1.0f)
+
+            // Diary ruled lines
+            var y = topBoxBottom + 36f
+            val reflectionBoxTop = PAGE_HEIGHT - 130f
+            while (y < reflectionBoxTop) {
+                drawLine(lineColor, start = Offset(76f, y), end = Offset(PAGE_WIDTH, y), strokeWidth = 1f)
+                y += 34f
+            }
+
+            // Bottom reflection banner
+            drawLine(marginColor, start = Offset(0f, reflectionBoxTop), end = Offset(PAGE_WIDTH, reflectionBoxTop), strokeWidth = 1.5f)
+            var ry = reflectionBoxTop + 34f
+            while (ry < PAGE_HEIGHT - 20f) {
+                drawLine(lineColor, start = Offset(0f, ry), end = Offset(PAGE_WIDTH, ry), strokeWidth = 1f)
+                ry += 34f
             }
         }
     }
@@ -1515,7 +1680,6 @@ private class ContinuousInkView(
     private var fingerDrawingEnabled: Boolean,
     private val onViewportTransform: (Float, Float, Float, Float, Float) -> Unit,
     private val onOptimisticStroke: (StrokeEntity, InkStroke?) -> Unit,
-    private val onFinishedInkStrokeReady: (cacheKey: String, entityId: Long, InkStroke) -> Unit,
     private val onLassoSelectionChanged: (
         count: Int,
         selectedIds: Set<Long>,
@@ -1552,8 +1716,9 @@ private class ContinuousInkView(
     private var showEraserCircle = false
     private val currentGestureErasedStrokes = mutableListOf<StrokeEntity>()
     private val currentGestureErasedIds = mutableSetOf<Long>()
-    private val currentGestureOriginalStrokes = mutableMapOf<Long, StrokeEntity>()
-    private val currentGestureUpdatedStrokes = mutableMapOf<Long, StrokeEntity>()
+    private var tempPrecisionStrokeId = -1L
+    private val currentPrecisionOriginalStrokes = mutableMapOf<Long, StrokeEntity>()
+    private val currentPrecisionDeletedOriginalIds = mutableSetOf<Long>()
 
     private val eraserFillPaint = Paint().apply {
         color = AndroidColor.argb(45, 239, 83, 80)
@@ -1568,8 +1733,29 @@ private class ContinuousInkView(
     }
 
     // Laser Pointer State
-    private val laserPoints = mutableListOf<LaserPoint>()
-    private val laserHaloPaint = Paint().apply {
+    private val laserStrokes = mutableListOf<MutableList<LaserPoint>>()
+    private var isDrawingLaser = false
+    private var laserFadeStartTime = 0L
+
+    private fun getVibrantNeonColor(rawColor: Long): Int {
+        val r = (rawColor shr 16 and 0xFF).toInt()
+        val g = (rawColor shr 8 and 0xFF).toInt()
+        val b = (rawColor and 0xFF).toInt()
+        val luminance = 0.299f * r + 0.587f * g + 0.114f * b
+        // If color is too dark (e.g. black or dark gray), default to electric laser red
+        if (luminance < 75f) {
+            return AndroidColor.rgb(255, 30, 80) // Vibrant Electric Laser Red
+        }
+        return AndroidColor.rgb(r, g, b)
+    }
+
+    private val laserOuterGlowPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        isAntiAlias = true
+    }
+    private val laserMidGlowPaint = Paint().apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
@@ -1582,14 +1768,31 @@ private class ContinuousInkView(
         strokeJoin = Paint.Join.ROUND
         isAntiAlias = true
     }
-    private val laserDotPaint = Paint().apply {
+    private val laserDotOuterPaint = Paint().apply {
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    private val laserDotMidPaint = Paint().apply {
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    private val laserDotCorePaint = Paint().apply {
+        color = AndroidColor.WHITE
         style = Paint.Style.FILL
         isAntiAlias = true
     }
 
     // Freehand Lasso Selection State
+    private data class DecodedLassoStroke(
+        val stroke: StrokeEntity,
+        val pageTop: Float,
+        val points: List<StrokePoint>
+    )
+
     private val currentLassoPath = ArrayList<StrokePoint>()
     private val selectedStrokes = mutableListOf<StrokeEntity>()
+    private val selectedStrokesDecoded = ArrayList<DecodedLassoStroke>()
+    private var selectedStrokesBounds: StrokePointCodec.Bounds? = null
     private val selectedLassoClosedPath = ArrayList<StrokePoint>()
     private var selectedPageIndex = 0
     private var selectedPageId = 0L
@@ -1618,22 +1821,34 @@ private class ContinuousInkView(
         isAntiAlias = true
     }
 
-    private data class StrokeCacheEntry(val cacheKey: String, val entityId: Long)
-    private val strokeIdToCacheData = java.util.concurrent.ConcurrentHashMap<InProgressStrokeId, StrokeCacheEntry>()
-    private var activeInProgressStrokeId: InProgressStrokeId? = null
+    private data class FinishedStrokeMeta(
+        val pageId: Long,
+        val encodedBytes: ByteArray,
+        val color: Long,
+        val strokeWidth: Float,
+        val tool: StrokeTool
+    )
 
+    private val pendingFinishedStrokes = java.util.concurrent.ConcurrentHashMap<InProgressStrokeId, FinishedStrokeMeta>()
+    private var activeInProgressStrokeId: InProgressStrokeId? = null
     private val finishedStrokesListener = object : InProgressStrokesFinishedListener {
         override fun onStrokesFinished(strokes: Map<InProgressStrokeId, InkStroke>) {
             for ((strokeId, inkStroke) in strokes) {
-                val entry = strokeIdToCacheData.remove(strokeId)
-                if (entry != null) {
-                    onFinishedInkStrokeReady(entry.cacheKey, entry.entityId, inkStroke)
+                val meta = pendingFinishedStrokes.remove(strokeId)
+                if (meta != null) {
+                    val optimisticEntity = StrokeEntity(
+                        id = -System.nanoTime(),
+                        pageId = meta.pageId,
+                        pointData = meta.encodedBytes,
+                        color = meta.color,
+                        strokeWidth = meta.strokeWidth,
+                        tool = meta.tool.name
+                    )
+                    onOptimisticStroke(optimisticEntity, inkStroke)
                 }
             }
-
-            val keysSnapshot = strokes.keys.toSet()
-            post {
-                inkView.removeFinishedStrokes(keysSnapshot)
+            if (strokes.isNotEmpty()) {
+                inkView.removeFinishedStrokes(strokes.keys)
             }
         }
     }
@@ -1700,16 +1915,18 @@ private class ContinuousInkView(
                 val pt = currentLassoPath[i]
                 path.lineTo(pt.x * zoom + panX, pt.y * zoom + panY)
             }
-            canvas.drawPath(path, lassoFillPaint)
             canvas.drawPath(path, lassoContourPaint)
         }
 
         // 3. Freehand Lasso Closed Selection Outline (Around Selected Items in Document Space)
         if (selectedStrokes.isNotEmpty() && selectedLassoClosedPath.size >= 3) {
-            val path = Path()
-            val dx = if (isDraggingLassoSelection) lassoDragDeltaWorldX else 0f
-            val dy = if (isDraggingLassoSelection) lassoDragDeltaWorldY else 0f
+            val (dx, dy) = if (isDraggingLassoSelection) {
+                getClampedLassoDragDelta(lassoDragDeltaWorldX, lassoDragDeltaWorldY)
+            } else {
+                Pair(0f, 0f)
+            }
 
+            val path = Path()
             val first = selectedLassoClosedPath[0]
             path.moveTo((first.x + dx) * zoom + panX, (first.y + dy) * zoom + panY)
             for (i in 1 until selectedLassoClosedPath.size) {
@@ -1721,85 +1938,129 @@ private class ContinuousInkView(
             canvas.drawPath(path, lassoContourPaint)
         }
 
-        // 4. Moving Selected Strokes in Real-Time During Drag
-        if (isDraggingLassoSelection && selectedStrokes.isNotEmpty()) {
-            val dx = lassoDragDeltaWorldX
-            val dy = lassoDragDeltaWorldY
+        // 4. Moving Selected Strokes in Real-Time During Drag (Zero-Allocation Rendering)
+        if (isDraggingLassoSelection && selectedStrokesDecoded.isNotEmpty()) {
+            val (dx, dy) = getClampedLassoDragDelta(lassoDragDeltaWorldX, lassoDragDeltaWorldY)
 
-            for (stroke in selectedStrokes) {
-                val points = StrokePointCodec.decode(stroke.pointData)
+            for (decoded in selectedStrokesDecoded) {
+                val points = decoded.points
                 if (points.isEmpty()) continue
-                val pageTop = getPageTopY(stroke.pageId)
+                val pageTop = decoded.pageTop
 
-                movingStrokePaint.color = stroke.color.toInt()
-                movingStrokePaint.strokeWidth = stroke.strokeWidth * zoom
+                movingStrokePaint.color = decoded.stroke.color.toInt()
+                movingStrokePaint.strokeWidth = decoded.stroke.strokeWidth * zoom
 
                 if (points.size == 1) {
                     val p = points[0]
                     val sx = (p.x + dx) * zoom + panX
                     val sy = (p.y + pageTop + dy) * zoom + panY
-                    canvas.drawCircle(sx, sy, (stroke.strokeWidth * zoom) / 2f, movingStrokePaint)
+                    canvas.drawCircle(sx, sy, (decoded.stroke.strokeWidth * zoom) / 2f, movingStrokePaint)
                 } else {
-                    for (i in 0 until points.size - 1) {
-                        val p1 = points[i]
-                        val p2 = points[i + 1]
-                        val x1 = (p1.x + dx) * zoom + panX
-                        val y1 = (p1.y + pageTop + dy) * zoom + panY
-                        val x2 = (p2.x + dx) * zoom + panX
-                        val y2 = (p2.y + pageTop + dy) * zoom + panY
-                        canvas.drawLine(x1, y1, x2, y2, movingStrokePaint)
+                    val path = Path()
+                    val first = points[0]
+                    path.moveTo((first.x + dx) * zoom + panX, (first.y + pageTop + dy) * zoom + panY)
+                    for (i in 1 until points.size) {
+                        val p = points[i]
+                        path.lineTo((p.x + dx) * zoom + panX, (p.y + pageTop + dy) * zoom + panY)
                     }
+                    canvas.drawPath(path, movingStrokePaint)
                 }
             }
         }
 
-        // 5. Glowing Neon Laser Pointer Beam & Dot
-        if (laserPoints.isNotEmpty()) {
+        // 5. Glowing Neon Laser Pointer Beam & Dot (Pure white center + selected vibrant neon glow surrounding)
+        if (laserStrokes.isNotEmpty()) {
             val now = SystemClock.uptimeMillis()
-            laserPoints.removeAll { now - it.timestamp > laserDurationMs }
+            val globalLife = if (isDrawingLaser) {
+                1.0f
+            } else {
+                if (laserFadeStartTime == 0L) {
+                    laserFadeStartTime = now
+                }
+                val elapsed = now - laserFadeStartTime
+                (1f - (elapsed.toFloat() / laserDurationMs)).coerceIn(0f, 1f)
+            }
 
-            if (laserPoints.isNotEmpty()) {
-                val laserBaseWidth = strokeWidth * zoom * 1.5f
-                val colorInt = strokeColor.toInt()
+            if (globalLife <= 0.005f) {
+                laserStrokes.clear()
+                laserFadeStartTime = 0L
+            } else {
+                val laserBaseWidth = (strokeWidth * zoom).coerceAtLeast(2.5f)
+                val neonColor = getVibrantNeonColor(strokeColor)
 
-                laserHaloPaint.color = colorInt
-                laserDotPaint.color = colorInt
+                laserOuterGlowPaint.color = neonColor
+                laserMidGlowPaint.color = neonColor
+                laserDotOuterPaint.color = neonColor
+                laserDotMidPaint.color = neonColor
 
-                if (laserHasTail && laserPoints.size >= 2) {
-                    for (i in 0 until laserPoints.size - 1) {
-                        val p1 = laserPoints[i]
-                        val p2 = laserPoints[i + 1]
-                        val age = now - p2.timestamp
-                        val life = (1f - (age.toFloat() / laserDurationMs)).coerceIn(0f, 1f)
+                if (laserHasTail) {
+                    for (stroke in laserStrokes) {
+                        if (stroke.size >= 2) {
+                            val path = Path()
+                            path.moveTo(stroke[0].screenX, stroke[0].screenY)
+                            for (i in 1 until stroke.size) {
+                                val prev = stroke[i - 1]
+                                val curr = stroke[i]
+                                val midX = (prev.screenX + curr.screenX) / 2f
+                                val midY = (prev.screenY + curr.screenY) / 2f
+                                if (i == 1) {
+                                    path.lineTo(midX, midY)
+                                } else {
+                                    path.quadTo(prev.screenX, prev.screenY, midX, midY)
+                                }
+                            }
+                            val last = stroke.last()
+                            path.lineTo(last.screenX, last.screenY)
 
-                        if (life > 0.01f) {
-                            // Outer neon glow
-                            laserHaloPaint.strokeWidth = laserBaseWidth * (1.6f + life * 1.0f)
-                            laserHaloPaint.alpha = (life * 140).toInt()
-                            canvas.drawLine(p1.screenX, p1.screenY, p2.screenX, p2.screenY, laserHaloPaint)
+                            // Layer 1: Wide Outer Neon Glow Aura
+                            laserOuterGlowPaint.strokeWidth = laserBaseWidth * 2.2f
+                            laserOuterGlowPaint.alpha = (globalLife * 60).toInt()
+                            canvas.drawPath(path, laserOuterGlowPaint)
 
-                            // Middle neon beam
-                            laserHaloPaint.strokeWidth = laserBaseWidth * (0.8f + life * 0.4f)
-                            laserHaloPaint.alpha = (life * 230).toInt()
-                            canvas.drawLine(p1.screenX, p1.screenY, p2.screenX, p2.screenY, laserHaloPaint)
+                            // Layer 2: Medium Luminous Neon Corona
+                            laserMidGlowPaint.strokeWidth = laserBaseWidth * 1.3f
+                            laserMidGlowPaint.alpha = (globalLife * 160).toInt()
+                            canvas.drawPath(path, laserMidGlowPaint)
 
-                            // Inner bright core
-                            laserCorePaint.strokeWidth = laserBaseWidth * 0.4f
-                            laserCorePaint.alpha = (life * 255).toInt()
-                            canvas.drawLine(p1.screenX, p1.screenY, p2.screenX, p2.screenY, laserCorePaint)
+                            // Layer 3: Vibrant Surrounding Neon Sheen
+                            laserMidGlowPaint.strokeWidth = laserBaseWidth * 0.8f
+                            laserMidGlowPaint.alpha = (globalLife * 240).toInt()
+                            canvas.drawPath(path, laserMidGlowPaint)
+
+                            // Layer 4: Pure Brilliant White Core Beam
+                            laserCorePaint.strokeWidth = (laserBaseWidth * 0.35f).coerceAtLeast(1.5f)
+                            laserCorePaint.alpha = (globalLife * 255).toInt()
+                            canvas.drawPath(path, laserCorePaint)
+                        } else if (stroke.size == 1) {
+                            val pt = stroke[0]
+                            laserDotOuterPaint.alpha = (globalLife * 75).toInt()
+                            canvas.drawCircle(pt.screenX, pt.screenY, laserBaseWidth * 1.8f, laserDotOuterPaint)
+                            laserDotMidPaint.alpha = (globalLife * 220).toInt()
+                            canvas.drawCircle(pt.screenX, pt.screenY, laserBaseWidth * 1.1f, laserDotMidPaint)
+                            laserDotCorePaint.alpha = (globalLife * 255).toInt()
+                            canvas.drawCircle(pt.screenX, pt.screenY, (laserBaseWidth * 0.45f).coerceAtLeast(1.8f), laserDotCorePaint)
                         }
                     }
                 }
 
-                // Laser head pointer dot
-                val head = laserPoints.last()
-                laserHaloPaint.alpha = 180
-                canvas.drawCircle(head.screenX, head.screenY, laserBaseWidth * 1.5f, laserHaloPaint)
-                laserDotPaint.alpha = 255
-                canvas.drawCircle(head.screenX, head.screenY, laserBaseWidth * 0.7f, laserDotPaint)
-                canvas.drawCircle(head.screenX, head.screenY, laserBaseWidth * 0.35f, laserCorePaint)
+                // Laser Head Pointer Dot (Tip of the active drawing stroke)
+                val activeStroke = laserStrokes.lastOrNull()
+                val head = activeStroke?.lastOrNull()
+                if (head != null) {
+                    // Outer neon pulse
+                    laserDotOuterPaint.alpha = (globalLife * 75).toInt()
+                    canvas.drawCircle(head.screenX, head.screenY, laserBaseWidth * 1.8f, laserDotOuterPaint)
+                    // Mid neon halo
+                    laserDotMidPaint.alpha = (globalLife * 220).toInt()
+                    canvas.drawCircle(head.screenX, head.screenY, laserBaseWidth * 1.1f, laserDotMidPaint)
+                    // Pure white intense core
+                    laserDotCorePaint.alpha = (globalLife * 255).toInt()
+                    canvas.drawCircle(head.screenX, head.screenY, (laserBaseWidth * 0.45f).coerceAtLeast(1.8f), laserDotCorePaint)
+                }
 
-                postInvalidateOnAnimation()
+                if (!isDrawingLaser) {
+                    postInvalidateOnAnimation()
+                }
             }
         }
     }
@@ -1923,13 +2184,15 @@ private class ContinuousInkView(
 
         when (activeTool) {
             EditorTool.ERASER -> {
+                onInvalidateCache(null)
                 eraserScreenX = screenX
                 eraserScreenY = screenY
                 showEraserCircle = true
                 currentGestureErasedStrokes.clear()
                 currentGestureErasedIds.clear()
-                currentGestureOriginalStrokes.clear()
-                currentGestureUpdatedStrokes.clear()
+                tempPrecisionStrokeId = -1L
+                currentPrecisionOriginalStrokes.clear()
+                currentPrecisionDeletedOriginalIds.clear()
                 handleEraserMotion(currentStrokePoints)
                 invalidate()
             }
@@ -1945,6 +2208,7 @@ private class ContinuousInkView(
                     lassoDragDeltaWorldY = 0f
                     notifyLassoSelection(isDragging = true)
                 } else {
+                    onInvalidateCache(null)
                     clearLassoSelection()
                     currentLassoPath.clear()
                     currentLassoPath.add(StrokePoint(docX, docY, 0.5f, 0))
@@ -1953,18 +2217,36 @@ private class ContinuousInkView(
             }
 
             EditorTool.LASER -> {
-                laserPoints.clear()
-                laserPoints.add(LaserPoint(screenX, screenY, SystemClock.uptimeMillis()))
+                isDrawingLaser = true
+                laserFadeStartTime = 0L
+                val newStroke = mutableListOf(LaserPoint(screenX, screenY, SystemClock.uptimeMillis()))
+                laserStrokes.add(newStroke)
                 invalidate()
             }
 
-            EditorTool.PEN,
-            EditorTool.HIGHLIGHTER -> {
+            EditorTool.PEN -> {
+                val pageTop = pageTopY(targetIdx)
                 val motionToWorld = Matrix().apply {
                     postTranslate(-panX, -panY)
                     postScale(1f / zoom, 1f / zoom)
+                    postTranslate(0f, -pageTop)
                 }
                 predictor.record(event)
+                activeInProgressStrokeId = inkView.startStroke(
+                    event = event,
+                    pointerId = activePointerId!!,
+                    brush = brush,
+                    motionEventToWorldTransform = motionToWorld
+                )
+            }
+
+            EditorTool.HIGHLIGHTER -> {
+                val pageTop = pageTopY(targetIdx)
+                val motionToWorld = Matrix().apply {
+                    postTranslate(-panX, -panY)
+                    postScale(1f / zoom, 1f / zoom)
+                    postTranslate(0f, -pageTop)
+                }
                 activeInProgressStrokeId = inkView.startStroke(
                     event = event,
                     pointerId = activePointerId!!,
@@ -2011,21 +2293,37 @@ private class ContinuousInkView(
                     for (h in 0 until event.historySize) {
                         val hx = (event.getHistoricalX(pointerIndex, h) - panX) / zoom
                         val hy = (event.getHistoricalY(pointerIndex, h) - panY) / zoom
-                        currentLassoPath.add(StrokePoint(hx, hy, 0.5f, 0))
+                        val last = currentLassoPath.lastOrNull()
+                        if (last == null || ((hx - last.x) * (hx - last.x) + (hy - last.y) * (hy - last.y) >= 36f)) {
+                            currentLassoPath.add(StrokePoint(hx, hy, 0.5f, 0))
+                        }
                     }
-                    currentLassoPath.add(StrokePoint(docX, docY, 0.5f, 0))
+                    val last = currentLassoPath.lastOrNull()
+                    if (last == null || ((docX - last.x) * (docX - last.x) + (docY - last.y) * (docY - last.y) >= 36f)) {
+                        currentLassoPath.add(StrokePoint(docX, docY, 0.5f, 0))
+                    }
                 }
                 invalidate()
             }
 
             EditorTool.LASER -> {
+                isDrawingLaser = true
+                laserFadeStartTime = 0L
                 val now = SystemClock.uptimeMillis()
-                laserPoints.add(LaserPoint(screenX, screenY, now))
+                val currentStroke = laserStrokes.lastOrNull() ?: mutableListOf<LaserPoint>().also { laserStrokes.add(it) }
+                currentStroke.add(LaserPoint(screenX, screenY, now))
                 invalidate()
             }
 
-            EditorTool.PEN,
             EditorTool.HIGHLIGHTER -> {
+                inkView.addToStroke(
+                    event = event,
+                    pointerId = pointerId,
+                    prediction = null
+                )
+            }
+
+            EditorTool.PEN -> {
                 predictor.record(event)
                 val prediction = predictor.predict()
                 inkView.addToStroke(
@@ -2054,13 +2352,18 @@ private class ContinuousInkView(
                         currentGestureErasedIds.clear()
                     }
                 } else {
-                    if (currentGestureOriginalStrokes.isNotEmpty()) {
-                        val originalList = currentGestureOriginalStrokes.values.toList()
-                        val updatedList = currentGestureUpdatedStrokes.values.toList()
-                        viewModel.transformStrokes(activePageId, originalList, updatedList)
-                        onInvalidateCache(currentGestureOriginalStrokes.keys)
-                        currentGestureOriginalStrokes.clear()
-                        currentGestureUpdatedStrokes.clear()
+                    if (currentPrecisionDeletedOriginalIds.isNotEmpty()) {
+                        val allStrokesMap = pageStrokesProvider()
+                        val currentStrokesOnPage = allStrokesMap[activePageId] ?: emptyList()
+                        val finalStrokesToPersist = currentStrokesOnPage.filter { it.id < 0 }
+                        viewModel.commitPrecisionEraseSession(
+                            pageId = activePageId,
+                            deletedIds = currentPrecisionDeletedOriginalIds.toSet(),
+                            originalStrokes = currentPrecisionOriginalStrokes.values.toList(),
+                            finalStrokes = finalStrokesToPersist
+                        )
+                        currentPrecisionOriginalStrokes.clear()
+                        currentPrecisionDeletedOriginalIds.clear()
                     }
                 }
             }
@@ -2085,8 +2388,9 @@ private class ContinuousInkView(
                         currentLassoPath.add(StrokePoint(docX, docY, 0.5f, 0))
                     }
                     if (currentLassoPath.size >= 3) {
+                        val simplified = simplifyPath(currentLassoPath, 10f)
                         selectedLassoClosedPath.clear()
-                        selectedLassoClosedPath.addAll(currentLassoPath)
+                        selectedLassoClosedPath.addAll(simplified)
                         computeLassoSelection(selectedLassoClosedPath)
                         currentLassoPath.clear()
                     }
@@ -2094,11 +2398,18 @@ private class ContinuousInkView(
                 invalidate()
             }
 
-            EditorTool.LASER -> Unit
+            EditorTool.LASER -> {
+                isDrawingLaser = false
+                laserFadeStartTime = SystemClock.uptimeMillis()
+                postInvalidateOnAnimation()
+            }
 
             EditorTool.PEN,
             EditorTool.HIGHLIGHTER -> {
-                predictor.record(event)
+                if (activeTool == EditorTool.PEN) {
+                    predictor.record(event)
+                }
+                val finishedId = activeInProgressStrokeId
                 inkView.finishStroke(event, pointerId)
                 activeInProgressStrokeId = null
 
@@ -2107,31 +2418,41 @@ private class ContinuousInkView(
                     val pointsCopy = currentStrokePoints.toList()
                     val toolEnum = activeTool!!.toStrokeTool()
 
-                    val segmentsByPage = partitionStrokeAcrossPages(pointsCopy, pages)
+                    // Assign stroke to the page where it originates
+                    val startDocY = pointsCopy.first().y
+                    val pageIdx = (startDocY / PAGE_HEIGHT).toInt().coerceIn(0, pages.size - 1)
+                    val targetPage = pages[pageIdx]
+                    val pageTop = pageTopY(pageIdx)
 
-                    for ((page, finalPoints) in segmentsByPage) {
-                        if (finalPoints.isEmpty()) continue
-                        val tempId = -System.nanoTime()
-                        val encodedBytes = StrokePointCodec.encode(finalPoints)
-
-                        val optimisticEntity = StrokeEntity(
-                            id = tempId,
-                            pageId = page.id,
-                            pointData = encodedBytes,
-                            color = strokeColor,
-                            strokeWidth = strokeWidth,
-                            tool = toolEnum.name
+                    val localPoints = if (pointsCopy.size == 1) {
+                        val p = pointsCopy[0]
+                        listOf(
+                            StrokePoint(p.x, p.y - pageTop, p.pressure, p.elapsedMillis),
+                            StrokePoint(p.x + 0.05f, (p.y - pageTop) + 0.05f, p.pressure, p.elapsedMillis + 1)
                         )
-                        onOptimisticStroke(optimisticEntity, null)
+                    } else {
+                        pointsCopy.map { StrokePoint(it.x, it.y - pageTop, it.pressure, it.elapsedMillis) }
+                    }
 
-                        viewModel.addStroke(
-                            pageId = page.id,
-                            points = finalPoints,
+                    val encodedBytes = StrokePointCodec.encode(localPoints)
+
+                    if (finishedId != null) {
+                        pendingFinishedStrokes[finishedId] = FinishedStrokeMeta(
+                            pageId = targetPage.id,
+                            encodedBytes = encodedBytes,
                             color = strokeColor,
                             strokeWidth = strokeWidth,
                             tool = toolEnum
                         )
                     }
+
+                    viewModel.addStroke(
+                        pageId = targetPage.id,
+                        points = localPoints,
+                        color = strokeColor,
+                        strokeWidth = strokeWidth,
+                        tool = toolEnum
+                    )
                 }
             }
 
@@ -2149,6 +2470,11 @@ private class ContinuousInkView(
             inkView.cancelUnfinishedStrokes()
             activeInProgressStrokeId = null
         }
+        if (activeTool == EditorTool.LASER) {
+            isDrawingLaser = false
+            laserFadeStartTime = SystemClock.uptimeMillis()
+            postInvalidateOnAnimation()
+        }
         if (activeTool == EditorTool.LASSO) {
             if (isDraggingLassoSelection) {
                 val dx = lassoDragDeltaWorldX
@@ -2161,8 +2487,9 @@ private class ContinuousInkView(
                 lassoDragDeltaWorldY = 0f
                 notifyLassoSelection(isDragging = false)
             } else if (currentLassoPath.size >= 3) {
+                val simplified = simplifyPath(currentLassoPath, 10f)
                 selectedLassoClosedPath.clear()
-                selectedLassoClosedPath.addAll(currentLassoPath)
+                selectedLassoClosedPath.addAll(simplified)
                 computeLassoSelection(selectedLassoClosedPath)
                 currentLassoPath.clear()
             }
@@ -2180,11 +2507,30 @@ private class ContinuousInkView(
         if (pointsToTest.isEmpty()) return
         val allStrokesMap = pageStrokesProvider()
         val pages = pagesProvider()
-        val effectiveRadius = (eraserRadius / zoom) / 2f
+        val effectiveRadius = eraserRadius / 2f
+
+        // Fast Document-Space Bounding Box of the eraser sweep
+        var eMinY = Float.MAX_VALUE
+        var eMaxY = -Float.MAX_VALUE
+        for (p in pointsToTest) {
+            if (p.y < eMinY) eMinY = p.y
+            if (p.y > eMaxY) eMaxY = p.y
+        }
+        val paddedMinY = eMinY - effectiveRadius - 10f
+        val paddedMaxY = eMaxY + effectiveRadius + 10f
 
         for ((idx, page) in pages.withIndex()) {
             val pageTop = pageTopY(idx)
+            val pageBottom = pageTop + PAGE_HEIGHT
+
+            // Skip pages outside eraser vertical reach
+            if (paddedMaxY < pageTop || paddedMinY > pageBottom) {
+                continue
+            }
+
             val currentStrokes = allStrokesMap[page.id] ?: emptyList()
+            if (currentStrokes.isEmpty()) continue
+
             val localEraserPoints = pointsToTest.map { StrokePoint(it.x, it.y - pageTop, it.pressure, it.elapsedMillis) }
 
             if (eraserMode == EraserMode.STROKE) {
@@ -2217,22 +2563,22 @@ private class ContinuousInkView(
                     val splitStrokes = StrokeRepository.precisionEraseStroke(
                         stroke = stroke,
                         eraserPoints = localEraserPoints,
-                        eraserRadius = effectiveRadius
+                        eraserRadius = effectiveRadius + stroke.strokeWidth / 2f
                     )
                     if (splitStrokes != null) {
-                        if (stroke.id !in currentGestureOriginalStrokes) {
-                            currentGestureOriginalStrokes[stroke.id] = stroke
+                        if (stroke.id > 0 && stroke.id !in currentPrecisionOriginalStrokes) {
+                            currentPrecisionOriginalStrokes[stroke.id] = stroke
+                        }
+                        if (stroke.id > 0) {
+                            currentPrecisionDeletedOriginalIds.add(stroke.id)
                         }
 
-                        if (splitStrokes.isEmpty()) {
-                            viewModel.eraseStrokesInstantly(page.id, setOf(stroke.id))
-                            currentGestureUpdatedStrokes.remove(stroke.id)
-                        } else {
-                            val updatedStroke = splitStrokes.first().copy(id = stroke.id)
-                            currentGestureUpdatedStrokes[stroke.id] = updatedStroke
-                            onInvalidateCache(setOf(stroke.id))
-                            viewModel.transformStrokes(page.id, listOf(stroke), listOf(updatedStroke))
+                        val piecesWithUniqueIds = splitStrokes.map {
+                            it.copy(id = tempPrecisionStrokeId--)
                         }
+
+                        onInvalidateCache(setOf(stroke.id))
+                        viewModel.updateLivePrecisionStrokes(page.id, setOf(stroke.id), piecesWithUniqueIds)
                     }
                 }
             }
@@ -2245,11 +2591,35 @@ private class ContinuousInkView(
         return if (idx >= 0) pageTopY(idx) else 0f
     }
 
-    private fun computeLassoSelection(lassoPolygon: List<StrokePoint>) {
+    private fun simplifyPath(points: List<StrokePoint>, tolerance: Float = 10f): List<StrokePoint> {
+        if (points.size <= 3) return points
+        val result = ArrayList<StrokePoint>(points.size / 2)
+        result.add(points.first())
+        var lastPt = points.first()
+        val tolSq = tolerance * tolerance
+
+        for (i in 1 until points.size - 1) {
+            val pt = points[i]
+            val dx = pt.x - lastPt.x
+            val dy = pt.y - lastPt.y
+            if (dx * dx + dy * dy >= tolSq) {
+                result.add(pt)
+                lastPt = pt
+            }
+        }
+        result.add(points.last())
+        return result
+    }
+
+    private fun computeLassoSelection(rawPolygon: List<StrokePoint>) {
+        if (rawPolygon.size < 3) return
+        val lassoPolygon = simplifyPath(rawPolygon, 10f)
         if (lassoPolygon.size < 3) return
+
         val allStrokesMap = pageStrokesProvider()
         val pages = pagesProvider()
         val selected = mutableListOf<StrokeEntity>()
+        val decodedList = ArrayList<DecodedLassoStroke>()
 
         var polyMinX = Float.MAX_VALUE
         var polyMinY = Float.MAX_VALUE
@@ -2262,87 +2632,84 @@ private class ContinuousInkView(
             polyMaxY = max(polyMaxY, p.y)
         }
 
+        var overallMinX = Float.MAX_VALUE
+        var overallMinY = Float.MAX_VALUE
+        var overallMaxX = -Float.MAX_VALUE
+        var overallMaxY = -Float.MAX_VALUE
+
         for ((idx, page) in pages.withIndex()) {
             val pageTop = pageTopY(idx)
             val strokes = allStrokesMap[page.id] ?: continue
 
             for (stroke in strokes) {
-                val strokePoints = StrokePointCodec.decode(stroke.pointData)
-                if (strokePoints.isEmpty()) continue
+                val bounds = StrokePointCodec.computeBounds(stroke.pointData, pageTop) ?: continue
 
-                val docPoints = strokePoints.map { StrokePoint(it.x, it.y + pageTop, it.pressure, it.elapsedMillis) }
-
-                var sMinX = Float.MAX_VALUE
-                var sMinY = Float.MAX_VALUE
-                var sMaxX = -Float.MAX_VALUE
-                var sMaxY = -Float.MAX_VALUE
-                for (pt in docPoints) {
-                    sMinX = min(sMinX, pt.x)
-                    sMinY = min(sMinY, pt.y)
-                    sMaxX = max(sMaxX, pt.x)
-                    sMaxY = max(sMaxY, pt.y)
-                }
-
-                if (sMaxX < polyMinX || sMinX > polyMaxX || sMaxY < polyMinY || sMinY > polyMaxY) {
+                // Fast AABB check against lasso bounding box
+                if (bounds.maxX < polyMinX || bounds.minX > polyMaxX || bounds.maxY < polyMinY || bounds.minY > polyMaxY) {
                     continue
                 }
 
-                var pointsInside = 0
-                for (pt in docPoints) {
-                    if (isPointInPolygon(pt, lassoPolygon)) {
-                        pointsInside++
-                    }
-                }
-
-                val strokeCentroid = StrokePoint(
-                    x = (sMinX + sMaxX) / 2f,
-                    y = (sMinY + sMaxY) / 2f,
+                val centroid = StrokePoint(
+                    x = (bounds.minX + bounds.maxX) / 2f,
+                    y = (bounds.minY + bounds.maxY) / 2f,
                     pressure = 0.5f,
                     elapsedMillis = 0
                 )
-                val centroidInside = isPointInPolygon(strokeCentroid, lassoPolygon)
-                val ratio = pointsInside.toFloat() / docPoints.size.toFloat()
 
-                var intersects = false
-                if (pointsInside == 0 && !centroidInside) {
-                    for (i in 0 until docPoints.size - 1) {
-                        val sp1 = docPoints[i]
-                        val sp2 = docPoints[i + 1]
-                        var prevLasso = lassoPolygon.last()
-                        for (currLasso in lassoPolygon) {
-                            if (segmentsIntersect(sp1.x, sp1.y, sp2.x, sp2.y, prevLasso.x, prevLasso.y, currLasso.x, currLasso.y)) {
-                                intersects = true
-                                break
-                            }
-                            prevLasso = currLasso
+                // If centroid is inside lasso polygon, select stroke immediately
+                var isSelected = isPointInPolygon(centroid, lassoPolygon)
+
+                var strokePoints: List<StrokePoint>? = null
+                if (!isSelected) {
+                    strokePoints = StrokePointCodec.decode(stroke.pointData)
+                    for (pt in strokePoints) {
+                        if (isPointInPolygon(StrokePoint(pt.x, pt.y + pageTop, pt.pressure, pt.elapsedMillis), lassoPolygon)) {
+                            isSelected = true
+                            break
                         }
-                        if (intersects) break
+                    }
+
+                    if (!isSelected && strokePoints.size >= 2) {
+                        val lassoSegments = lassoPolygon.zipWithNext().ifEmpty { lassoPolygon.zip(lassoPolygon) }
+                        val strokeSegments = strokePoints.zipWithNext()
+                        for ((sStart, sEnd) in strokeSegments) {
+                            val s1 = StrokePoint(sStart.x, sStart.y + pageTop, sStart.pressure, sStart.elapsedMillis)
+                            val s2 = StrokePoint(sEnd.x, sEnd.y + pageTop, sEnd.pressure, sEnd.elapsedMillis)
+                            for ((lStart, lEnd) in lassoSegments) {
+                                if (segmentsIntersect(s1, s2, lStart, lEnd)) {
+                                    isSelected = true
+                                    break
+                                }
+                            }
+                            if (isSelected) break
+                        }
                     }
                 }
 
-                if (pointsInside >= 1 || centroidInside || intersects || ratio >= 0.15f) {
+                if (isSelected) {
                     selected.add(stroke)
+                    val pts = strokePoints ?: StrokePointCodec.decode(stroke.pointData)
+                    decodedList.add(DecodedLassoStroke(stroke, pageTop, pts))
+                    overallMinX = min(overallMinX, bounds.minX)
+                    overallMinY = min(overallMinY, bounds.minY)
+                    overallMaxX = max(overallMaxX, bounds.maxX)
+                    overallMaxY = max(overallMaxY, bounds.maxY)
                 }
             }
         }
 
         selectedStrokes.clear()
         selectedStrokes.addAll(selected)
+        selectedStrokesDecoded.clear()
+        selectedStrokesDecoded.addAll(decodedList)
+
         if (selectedStrokes.isEmpty()) {
             selectedLassoClosedPath.clear()
+            selectedStrokesBounds = null
+        } else {
+            selectedStrokesBounds = StrokePointCodec.Bounds(overallMinX, overallMinY, overallMaxX, overallMaxY)
         }
         notifyLassoSelection(isDragging = false)
-    }
-
-    private fun segmentsIntersect(
-        p1x: Float, p1y: Float, p2x: Float, p2y: Float,
-        p3x: Float, p3y: Float, p4x: Float, p4y: Float
-    ): Boolean {
-        fun ccw(ax: Float, ay: Float, bx: Float, by: Float, cx: Float, cy: Float): Boolean {
-            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
-        }
-        return (ccw(p1x, p1y, p3x, p3y, p4x, p4y) != ccw(p2x, p2y, p3x, p3y, p4x, p4y)) &&
-               (ccw(p1x, p1y, p2x, p2y, p3x, p3y) != ccw(p1x, p1y, p2x, p2y, p4x, p4y))
     }
 
     private fun isTouchInsideSelection(docX: Float, docY: Float): Boolean {
@@ -2353,37 +2720,12 @@ private class ContinuousInkView(
             return true
         }
 
-        // 2. Check inside bounding box of selected strokes with touch padding in document coordinates
-        var minX = Float.MAX_VALUE
-        var minY = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE
-        var maxY = -Float.MAX_VALUE
-        for (stroke in selectedStrokes) {
-            val pageTop = getPageTopY(stroke.pageId)
-            val pts = StrokePointCodec.decode(stroke.pointData)
-            for (p in pts) {
-                minX = min(minX, p.x)
-                minY = min(minY, p.y + pageTop)
-                maxX = max(maxX, p.x)
-                maxY = max(maxY, p.y + pageTop)
-            }
-        }
-        val padding = 40f / zoom
-        if (docX in (minX - padding)..(maxX + padding) && docY in (minY - padding)..(maxY + padding)) {
-            return true
-        }
-
-        // 3. Proximity to any stroke point in document space
-        val touchRadiusSq = (48f / zoom) * (48f / zoom)
-        for (stroke in selectedStrokes) {
-            val pageTop = getPageTopY(stroke.pageId)
-            val pts = StrokePointCodec.decode(stroke.pointData)
-            for (p in pts) {
-                val dx = p.x - docX
-                val dy = (p.y + pageTop) - docY
-                if (dx * dx + dy * dy <= touchRadiusSq) {
-                    return true
-                }
+        // 2. Check inside pre-computed bounding box with padding (zero allocations)
+        val bounds = selectedStrokesBounds
+        if (bounds != null) {
+            val padding = 40f / zoom
+            if (docX in (bounds.minX - padding)..(bounds.maxX + padding) && docY in (bounds.minY - padding)..(bounds.maxY + padding)) {
+                return true
             }
         }
 
@@ -2407,61 +2749,97 @@ private class ContinuousInkView(
         return inside
     }
 
+    private fun segmentsIntersect(p1: StrokePoint, p2: StrokePoint, p3: StrokePoint, p4: StrokePoint): Boolean {
+        fun ccw(a: StrokePoint, b: StrokePoint, c: StrokePoint): Float =
+            (c.y - a.y) * (b.x - a.x) - (b.y - a.y) * (c.x - a.x)
+        val d1 = ccw(p3, p4, p1)
+        val d2 = ccw(p3, p4, p2)
+        val d3 = ccw(p1, p2, p3)
+        val d4 = ccw(p1, p2, p4)
+        return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+               ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+    }
+
     private fun getClampedLassoDragDelta(rawDx: Float, rawDy: Float): Pair<Float, Float> {
-        if (selectedStrokes.isEmpty()) return Pair(rawDx, rawDy)
+        val bounds = selectedStrokesBounds ?: return Pair(rawDx, rawDy)
+        val pages = pagesProvider()
+        val totalDocHeight = (pages.size * PAGE_HEIGHT) + max(0, pages.size - 1) * PAGE_GAP
 
-        var minX = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE
-        var minY = Float.MAX_VALUE
-        var maxY = -Float.MAX_VALUE
+        val minDx = -bounds.minX
+        val maxDx = max(minDx, PAGE_WIDTH - bounds.maxX)
+        val clampedDx = if (minDx <= maxDx) rawDx.coerceIn(minDx, maxDx) else rawDx
 
-        for (stroke in selectedStrokes) {
-            val pts = StrokePointCodec.decode(stroke.pointData)
-            for (p in pts) {
-                minX = min(minX, p.x)
-                maxX = max(maxX, p.x)
-                minY = min(minY, p.y)
-                maxY = max(maxY, p.y)
-            }
-        }
-
-        val clampedDx = if (minX <= maxX) {
-            rawDx.coerceIn(-minX, PAGE_WIDTH - maxX)
-        } else rawDx
-
-        val clampedDy = if (minY <= maxY) {
-            rawDy.coerceIn(-minY, PAGE_HEIGHT - maxY)
-        } else rawDy
+        val minDy = -bounds.minY
+        val maxDy = max(minDy, totalDocHeight - bounds.maxY)
+        val clampedDy = if (minDy <= maxDy) rawDy.coerceIn(minDy, maxDy) else rawDy
 
         return Pair(clampedDx, clampedDy)
     }
 
     private fun applyLassoTranslation(dx: Float, dy: Float) {
-        if (selectedStrokes.isEmpty()) return
-        val allStrokesGrouped = selectedStrokes.groupBy { it.pageId }
-        val affectedIds = selectedStrokes.map { it.id }.toSet()
+        if (selectedStrokesDecoded.isEmpty()) return
+        val pages = pagesProvider()
+        if (pages.isEmpty()) return
+
+        val affectedIds = selectedStrokesDecoded.map { it.stroke.id }.toSet()
         onInvalidateCache(affectedIds)
 
         val updatedSelectedStrokes = mutableListOf<StrokeEntity>()
+        val updatedDecodedList = mutableListOf<DecodedLassoStroke>()
 
-        for ((pageId, strokesOnPage) in allStrokesGrouped) {
-            val beforeList = strokesOnPage.toList()
-            val afterList = beforeList.map { stroke: StrokeEntity ->
-                val points = StrokePointCodec.decode(stroke.pointData)
-                val shifted = points.map { pt: StrokePoint ->
-                    pt.copy(
-                        x = (pt.x + dx).coerceIn(0f, PAGE_WIDTH),
-                        y = (pt.y + dy).coerceIn(0f, PAGE_HEIGHT)
-                    )
-                }
-                stroke.copy(pointData = StrokePointCodec.encode(shifted))
+        val beforeStrokesList = mutableListOf<StrokeEntity>()
+        val afterStrokesList = mutableListOf<StrokeEntity>()
+
+        for (decoded in selectedStrokesDecoded) {
+            val originalStroke = decoded.stroke
+            beforeStrokesList.add(originalStroke)
+
+            // Convert points to document coordinates to find vertical center
+            var minDocY = Float.MAX_VALUE
+            var maxDocY = -Float.MAX_VALUE
+            for (pt in decoded.points) {
+                val docY = pt.y + decoded.pageTop + dy
+                if (docY < minDocY) minDocY = docY
+                if (docY > maxDocY) maxDocY = docY
             }
-            viewModel.transformStrokes(pageId, beforeList, afterList)
-            updatedSelectedStrokes.addAll(afterList)
+
+            val strokeCenterDocY = if (minDocY <= maxDocY) (minDocY + maxDocY) / 2f else (decoded.points.firstOrNull()?.let { it.y + decoded.pageTop + dy } ?: 0f)
+            val newPageIdx = (strokeCenterDocY / PAGE_HEIGHT).toInt().coerceIn(0, pages.size - 1)
+            val targetPage = pages[newPageIdx]
+            val newPageTop = pageTopY(newPageIdx)
+
+            val shiftedPoints = decoded.points.map { pt ->
+                StrokePoint(
+                    x = (pt.x + dx).coerceIn(0f, PAGE_WIDTH),
+                    y = (pt.y + decoded.pageTop + dy) - newPageTop,
+                    pressure = pt.pressure,
+                    elapsedMillis = pt.elapsedMillis
+                )
+            }
+
+            val newBytes = StrokePointCodec.encode(shiftedPoints)
+            val updatedStroke = originalStroke.copy(
+                pageId = targetPage.id,
+                pointData = newBytes
+            )
+
+            updatedSelectedStrokes.add(updatedStroke)
+            updatedDecodedList.add(DecodedLassoStroke(updatedStroke, newPageTop, shiftedPoints))
+            afterStrokesList.add(updatedStroke)
         }
+
+        viewModel.transformStrokesMultiPage(beforeStrokesList, afterStrokesList)
 
         selectedStrokes.clear()
         selectedStrokes.addAll(updatedSelectedStrokes)
+        selectedStrokesDecoded.clear()
+        selectedStrokesDecoded.addAll(updatedDecodedList)
+
+        // Update cached bounds in document space
+        val b = selectedStrokesBounds
+        if (b != null) {
+            selectedStrokesBounds = StrokePointCodec.Bounds(b.minX + dx, b.minY + dy, b.maxX + dx, b.maxY + dy)
+        }
 
         // Translate the lasso closed outline path in document space as well
         val shiftedLasso = selectedLassoClosedPath.map { it.copy(x = it.x + dx, y = it.y + dy) }
@@ -2471,6 +2849,8 @@ private class ContinuousInkView(
 
     private fun clearLassoSelection() {
         selectedStrokes.clear()
+        selectedStrokesDecoded.clear()
+        selectedStrokesBounds = null
         selectedLassoClosedPath.clear()
         notifyLassoSelection(isDragging = false)
     }
@@ -2493,20 +2873,16 @@ private class ContinuousInkView(
                 // Recolor
                 val affectedIds = selectedStrokes.map { it.id }.toSet()
                 onInvalidateCache(affectedIds)
-                for ((pageId, strokesOnPage) in allStrokesGrouped) {
-                    val beforeList = strokesOnPage.toList()
-                    val afterList = beforeList.map { it.copy(color = newColor) }
-                    viewModel.transformStrokes(pageId, beforeList, afterList)
-                }
+                val beforeList = selectedStrokes.toList()
+                val afterList = beforeList.map { it.copy(color = newColor) }
+                viewModel.transformStrokesMultiPage(beforeList, afterList)
                 clearLassoSelection()
             },
             {
                 // Delete
                 val affectedIds = selectedStrokes.map { it.id }.toSet()
                 onInvalidateCache(affectedIds)
-                for ((pageId, strokesOnPage) in allStrokesGrouped) {
-                    viewModel.deleteStrokes(pageId, strokesOnPage)
-                }
+                viewModel.deleteStrokesMultiPage(selectedStrokes.toList())
                 clearLassoSelection()
             },
             {
@@ -2514,76 +2890,6 @@ private class ContinuousInkView(
                 clearLassoSelection()
             }
         )
-    }
-
-    private fun partitionStrokeAcrossPages(
-        points: List<StrokePoint>,
-        pages: List<PageEntity>
-    ): List<Pair<PageEntity, List<StrokePoint>>> {
-        if (points.isEmpty() || pages.isEmpty()) return emptyList()
-
-        val result = mutableListOf<Pair<PageEntity, MutableList<StrokePoint>>>()
-
-        fun getPageIndex(docY: Float): Int {
-            return (docY / PAGE_HEIGHT).toInt().coerceIn(0, pages.size - 1)
-        }
-
-        var currentIdx = getPageIndex(points.first().y)
-        var currentList = mutableListOf<StrokePoint>()
-        val firstTop = pageTopY(currentIdx)
-        currentList.add(StrokePoint(points.first().x, (points.first().y - firstTop).coerceIn(0f, PAGE_HEIGHT), points.first().pressure, points.first().elapsedMillis))
-        result.add(Pair(pages[currentIdx], currentList))
-
-        for (i in 0 until points.size - 1) {
-            val p1 = points[i]
-            val p2 = points[i + 1]
-            val idx1 = getPageIndex(p1.y)
-            val idx2 = getPageIndex(p2.y)
-
-            if (idx1 == idx2) {
-                val pageTop = pageTopY(idx1)
-                currentList.add(StrokePoint(p2.x, (p2.y - pageTop).coerceIn(0f, PAGE_HEIGHT), p2.pressure, p2.elapsedMillis))
-            } else {
-                // Crossing one or more page boundaries
-                val step = if (idx2 > idx1) 1 else -1
-                var curr = idx1
-
-                while (curr != idx2) {
-                    val next = curr + step
-                    val boundaryDocY = if (step > 0) next * PAGE_HEIGHT else curr * PAGE_HEIGHT
-                    val dy = p2.y - p1.y
-                    val t = if (dy != 0f) ((boundaryDocY - p1.y) / dy).coerceIn(0f, 1f) else 0f
-                    val boundaryX = (p1.x + t * (p2.x - p1.x)).coerceIn(0f, PAGE_WIDTH)
-                    val boundaryP = p1.pressure + t * (p2.pressure - p1.pressure)
-                    val boundaryT = (p1.elapsedMillis + t * (p2.elapsedMillis - p1.elapsedMillis)).toInt()
-
-                    // End the current page segment at the boundary edge
-                    val exitLocalY = if (step > 0) PAGE_HEIGHT else 0f
-                    currentList.add(StrokePoint(boundaryX, exitLocalY, boundaryP, boundaryT))
-
-                    // Start the next page segment at the boundary edge
-                    curr = next
-                    currentList = mutableListOf()
-                    val enterLocalY = if (step > 0) 0f else PAGE_HEIGHT
-                    currentList.add(StrokePoint(boundaryX, enterLocalY, boundaryP, boundaryT))
-                    result.add(Pair(pages[curr], currentList))
-                }
-
-                // Add p2 to the target page segment
-                val finalTop = pageTopY(idx2)
-                currentList.add(StrokePoint(p2.x, (p2.y - finalTop).coerceIn(0f, PAGE_HEIGHT), p2.pressure, p2.elapsedMillis))
-            }
-        }
-
-        return result.map { (page, segPoints) ->
-            val validPoints = if (segPoints.size == 1) {
-                val p = segPoints[0]
-                listOf(p, StrokePoint(p.x + 0.05f, p.y + 0.05f, p.pressure, p.elapsedMillis + 1))
-            } else {
-                segPoints
-            }
-            Pair(page, validPoints)
-        }
     }
 
     private fun addRealPoints(event: MotionEvent) {
@@ -2597,7 +2903,7 @@ private class ContinuousInkView(
         for (h in 0 until historySize) {
             val hx = event.getHistoricalX(pointerIndex, h)
             val hy = event.getHistoricalY(pointerIndex, h)
-            val worldX = ((hx - panX) / zoom).coerceIn(0f, PAGE_WIDTH)
+            val worldX = (hx - panX) / zoom
             val worldY = (hy - panY) / zoom
             val rawPressure = event.getHistoricalPressure(pointerIndex, h)
             val pressure = if (isStylus) rawPressure.coerceIn(0.05f, 1.0f) else 0.5f
@@ -2607,7 +2913,7 @@ private class ContinuousInkView(
 
         val sx = event.getX(pointerIndex)
         val sy = event.getY(pointerIndex)
-        val worldX = ((sx - panX) / zoom).coerceIn(0f, PAGE_WIDTH)
+        val worldX = (sx - panX) / zoom
         val worldY = (sy - panY) / zoom
         val rawPressure = event.getPressure(pointerIndex)
         val pressure = if (isStylus) rawPressure.coerceIn(0.05f, 1.0f) else 0.5f
@@ -2866,7 +3172,7 @@ private fun FreeNotesInstantSizeDialog(
         EditorTool.PEN -> 1f to 30f
         EditorTool.HIGHLIGHTER -> 6f to 60f
         EditorTool.ERASER -> 20f to 300f
-        EditorTool.LASER -> 4f to 40f
+        EditorTool.LASER -> 1f to 20f
         EditorTool.LASSO -> 1f to 10f
     }
 
@@ -2944,16 +3250,14 @@ private fun LaserPenSettingsDialog(
     onColorSelect: (Long) -> Unit
 ) {
     val laserColors = listOf(
-        0xFFE02424L to "Red",
-        0xFF3B82F6L to "Blue",
-        0xFF10B981L to "Green",
-        0xFFEC4899L to "Pink",
-        0xFF8B5CF6L to "Purple",
-        0xFFF59E0BL to "Yellow",
-        0xFFF87171L to "Coral",
-        0xFF38BDF8L to "Sky",
-        0xFFA855F7L to "Magenta",
-        0xFF18181BL to "Black"
+        0xFFFF2255L to "Electric Red",
+        0xFF00E5FFL to "Neon Cyan",
+        0xFF00E676L to "Laser Green",
+        0xFFD500F9L to "Vivid Purple",
+        0xFFFFD600L to "Neon Yellow",
+        0xFFFF6E40L to "Neon Coral",
+        0xFF2979FFL to "Sapphire Blue",
+        0xFFFFFFFFL to "Bright White"
     )
 
     AlertDialog(
@@ -3019,14 +3323,14 @@ private fun LaserPenSettingsDialog(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         IconButton(
-                            onClick = { onThicknessChange((thickness - 2f).coerceAtLeast(2f)) },
+                            onClick = { onThicknessChange((thickness - 1f).coerceAtLeast(1f)) },
                             modifier = Modifier.size(26.dp)
                         ) {
                             Text("−", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
-                        Text("${String.format("%.1f", thickness / 10f)}", style = MaterialTheme.typography.bodyMedium)
+                        Text("${String.format("%.1f", thickness)}", style = MaterialTheme.typography.bodyMedium)
                         IconButton(
-                            onClick = { onThicknessChange((thickness + 2f).coerceAtMost(30f)) },
+                            onClick = { onThicknessChange((thickness + 1f).coerceAtMost(20f)) },
                             modifier = Modifier.size(26.dp)
                         ) {
                             Text("+", fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -3036,7 +3340,7 @@ private fun LaserPenSettingsDialog(
                 Slider(
                     value = thickness,
                     onValueChange = { onThicknessChange(it) },
-                    valueRange = 2f..30f
+                    valueRange = 1f..20f
                 )
 
                 // Duration row
@@ -3193,8 +3497,16 @@ enum class EditorTool(val label: String, val icon: String) {
 }
 
 enum class PaperTemplate(val label: String) {
-    RULED("Ruled"),
+    RULED("Standard Ruled"),
+    COLLEGE_RULED("College Ruled"),
     GRID("Grid"),
+    CORNELL_RULED("Cornell Ruled"),
+    CORNELL_GRID("Cornell Grid"),
+    SINGLE_COLUMN("Single Column"),
+    TWO_COLUMN("Two Column"),
+    TWO_COLUMN_LEFT("Two Column (Left)"),
+    THREE_COLUMN("Three Column"),
+    DIARY("Diary"),
     BLANK("Blank")
 }
 

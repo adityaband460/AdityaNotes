@@ -51,11 +51,45 @@ interface StrokeOperationDao {
 
     @Query(
         """
+        SELECT * FROM stroke_operations
+        WHERE pageId IN (:pageIds) AND isUndone = 0
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    suspend fun getLatestAppliedOperationForPages(
+        pageIds: List<Long>
+    ): StrokeOperationEntity?
+
+    @Query(
+        """
+        SELECT * FROM stroke_operations
+        WHERE pageId IN (:pageIds) AND isUndone = 1
+        ORDER BY id ASC
+        LIMIT 1
+        """
+    )
+    suspend fun getNextRedoOperationForPages(
+        pageIds: List<Long>
+    ): StrokeOperationEntity?
+
+    @Query(
+        """
         DELETE FROM stroke_operations
         WHERE pageId = :pageId AND isUndone = 1
         """
     )
     suspend fun deleteRedoOperations(
         pageId: Long
+    )
+
+    @Query(
+        """
+        DELETE FROM stroke_operations
+        WHERE pageId IN (:pageIds) AND isUndone = 1
+        """
+    )
+    suspend fun deleteRedoOperationsForPages(
+        pageIds: List<Long>
     )
 }

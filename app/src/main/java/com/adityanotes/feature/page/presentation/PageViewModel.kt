@@ -67,18 +67,32 @@ class PageViewModel @Inject constructor(
             _currentNotebook.value = notebookRepository.getNotebookById(notebookId)
             pageRepository.getPagesForNotebook(notebookId).collect { pageList ->
                 if (pageList.isEmpty()) {
-                    // Create first page if notebook has none
+                    val nb = notebookRepository.getNotebookById(notebookId)
+                    if (nb == null) {
+                        // Notebook was deleted: clean up state and stop observing
+                        _pages.value = emptyList()
+                        _currentNotebook.value = null
+                        _pageStrokes.value = emptyMap()
+                        _strokes.value = emptyList()
+                        _currentPage.value = null
+                        currentPageId = null
+                        strokesJob?.cancel()
+                        return@collect
+                    }
+                    // Create first page only if notebook still exists in DB
                     val now = System.currentTimeMillis()
-                    val newPageId = pageRepository.createPage(
-                        PageEntity(
-                            notebookId = notebookId,
-                            name = "Page 1",
-                            paperTemplate = "RULED",
-                            isDarkPaper = false,
-                            createdAt = now,
-                            updatedAt = now
+                    runCatching {
+                        pageRepository.createPage(
+                            PageEntity(
+                                notebookId = notebookId,
+                                name = "Page 1",
+                                paperTemplate = "RULED",
+                                isDarkPaper = false,
+                                createdAt = now,
+                                updatedAt = now
+                            )
                         )
-                    )
+                    }
                     return@collect
                 }
 
@@ -296,6 +310,72 @@ class PageViewModel @Inject constructor(
     }
 
     /**
+     * Transforms strokes across one or more pages atomically with full Undo/Redo.
+     */
+    fun transformStrokesMultiPage(
+        beforeStrokes: List<StrokeEntity>,
+        afterStrokes: List<StrokeEntity>
+    ) {
+        if (beforeStrokes.isEmpty() || afterStrokes.isEmpty()) return
+        val affectedIds = beforeStrokes.map { it.id }.toSet()
+        val afterMap = afterStrokes.associateBy { it.id }
+
+        _strokes.value = _strokes.value.mapNotNull { stroke ->
+            if (stroke.id in affectedIds) afterMap[stroke.id] else stroke
+        }
+
+        val currentGroup = _pageStrokes.value.toMutableMap()
+        for ((pId, strokes) in currentGroup) {
+            currentGroup[pId] = strokes.filterNot { it.id in affectedIds }
+        }
+        val afterGrouped = afterStrokes.groupBy { it.pageId }
+        for ((pId, strokes) in afterGrouped) {
+            currentGroup[pId] = (currentGroup[pId] ?: emptyList()) + strokes
+        }
+        _pageStrokes.value = currentGroup
+
+        val activeId = currentPageId
+        if (activeId != null) {
+            _strokes.value = currentGroup[activeId] ?: emptyList()
+        }
+
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                strokeRepository.transformStrokesMultiPage(beforeStrokes, afterStrokes)
+            }
+        }
+    }
+
+    /**
+     * Updates in-memory state during precision erasing with temporary negative IDs.
+     */
+    fun updateLivePrecisionStrokes(pageId: Long, deletedIds: Set<Long>, newStrokes: List<StrokeEntity>) {
+        if (deletedIds.isEmpty() && newStrokes.isEmpty()) return
+        _strokes.value = _strokes.value.filterNot { it.id in deletedIds } + newStrokes
+        val currentGroup = _pageStrokes.value.toMutableMap()
+        val pageStrokesList = (currentGroup[pageId] ?: emptyList()).filterNot { it.id in deletedIds } + newStrokes
+        currentGroup[pageId] = pageStrokesList
+        _pageStrokes.value = currentGroup
+    }
+
+    /**
+     * Commits a precision erase session to Room DB once the gesture completes.
+     */
+    fun commitPrecisionEraseSession(
+        pageId: Long,
+        deletedIds: Set<Long>,
+        originalStrokes: List<StrokeEntity>,
+        finalStrokes: List<StrokeEntity>
+    ) {
+        if (deletedIds.isEmpty() && finalStrokes.isEmpty()) return
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                strokeRepository.commitPrecisionErase(pageId, deletedIds, originalStrokes, finalStrokes)
+            }
+        }
+    }
+
+    /**
      * Clones selected strokes and adds them to the page with full Undo/Redo.
      */
     fun duplicateStrokes(
@@ -335,6 +415,34 @@ class PageViewModel @Inject constructor(
         viewModelScope.launch {
             strokeMutex.withLock {
                 strokeRepository.recordEraseOperation(pageId, strokesToDelete)
+            }
+        }
+    }
+
+    /**
+     * Deletes a batch of strokes across multiple pages in one undoable step.
+     */
+    fun deleteStrokesMultiPage(strokesToDelete: List<StrokeEntity>) {
+        if (strokesToDelete.isEmpty()) return
+        val idsToDelete = strokesToDelete.map { it.id }.toSet()
+        _strokes.value = _strokes.value.filterNot { it.id in idsToDelete }
+        val currentGroup = _pageStrokes.value.toMutableMap()
+        for ((pId, strokes) in currentGroup) {
+            currentGroup[pId] = strokes.filterNot { it.id in idsToDelete }
+        }
+        _pageStrokes.value = currentGroup
+
+        val activeId = currentPageId
+        if (activeId != null) {
+            _strokes.value = currentGroup[activeId] ?: emptyList()
+        }
+
+        val grouped = strokesToDelete.groupBy { it.pageId }
+        viewModelScope.launch {
+            strokeMutex.withLock {
+                for ((pageId, list) in grouped) {
+                    strokeRepository.recordEraseOperation(pageId, list)
+                }
             }
         }
     }
@@ -392,21 +500,31 @@ class PageViewModel @Inject constructor(
     }
 
     fun undo() {
-        val pageId = currentPageId ?: return
+        val pageIds = _pages.value.map { it.id }
+        if (pageIds.isEmpty()) return
 
         viewModelScope.launch {
             strokeMutex.withLock {
-                strokeRepository.undo(pageId)
+                val activeId = currentPageId
+                val undone = if (activeId != null) strokeRepository.undo(activeId) else false
+                if (!undone) {
+                    strokeRepository.undo(pageIds)
+                }
             }
         }
     }
 
     fun redo() {
-        val pageId = currentPageId ?: return
+        val pageIds = _pages.value.map { it.id }
+        if (pageIds.isEmpty()) return
 
         viewModelScope.launch {
             strokeMutex.withLock {
-                strokeRepository.redo(pageId)
+                val activeId = currentPageId
+                val redone = if (activeId != null) strokeRepository.redo(activeId) else false
+                if (!redone) {
+                    strokeRepository.redo(pageIds)
+                }
             }
         }
     }

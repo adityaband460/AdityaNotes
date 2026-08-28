@@ -65,4 +65,46 @@ object StrokePointCodec {
                 }
             }
     }
+
+    data class Bounds(val minX: Float, val minY: Float, val maxX: Float, val maxY: Float)
+
+    fun computeBounds(data: ByteArray, pageTop: Float = 0f): Bounds? {
+        if (data.size >= HEADER_BYTES) {
+            val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+            val magic = buffer.int
+            val count = buffer.int
+            if (magic == MAGIC && count > 0 && count <= (data.size - HEADER_BYTES) / POINT_BYTES) {
+                var minX = Float.MAX_VALUE
+                var minY = Float.MAX_VALUE
+                var maxX = -Float.MAX_VALUE
+                var maxY = -Float.MAX_VALUE
+                for (i in 0 until count) {
+                    val x = buffer.float
+                    val y = buffer.float + pageTop
+                    buffer.float // skip pressure
+                    buffer.int   // skip elapsedMillis
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+                return Bounds(minX, minY, maxX, maxY)
+            }
+        }
+        val pts = decode(data)
+        if (pts.isEmpty()) return null
+        var minX = Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        for (p in pts) {
+            val x = p.x
+            val y = p.y + pageTop
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+        }
+        return Bounds(minX, minY, maxX, maxY)
+    }
 }
